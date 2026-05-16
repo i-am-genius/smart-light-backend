@@ -36,6 +36,7 @@ public class OpsAdminLogReadService {
     public void init() {
         add("backend", envOrProp("OPS_LOG_BACKEND_PATH", "/opt/smartlight/logs/backend-important.log"));
         add("backend-error", envOrProp("OPS_LOG_BACKEND_ERROR_PATH", "/opt/smartlight/logs/backend-error.log"));
+        add("backend-ws", envOrProp("OPS_LOG_BACKEND_WS_PATH", "/opt/smartlight/logs/backend-ws.log"));
         add("fabric-ai", envOrProp("OPS_LOG_FABRIC_AI_PATH", "/opt/smartlight/logs/fabric-ai.log"));
         add("nginx-error", envOrProp("OPS_LOG_NGINX_ERROR_PATH", "/var/log/nginx/error.log"));
         add("nginx-access", envOrProp("OPS_LOG_NGINX_ACCESS_PATH", "/var/log/nginx/access.log"));

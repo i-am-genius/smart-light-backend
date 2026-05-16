@@ -496,4 +496,183 @@ public class OpsAdminStoreService {
         if (v > 800) return "HIGH";
         return "NORMAL";
     }
+
+    // --- Store timeline ---
+
+    public OpsAdminStoreTimelineResp timeline(Long storeId, String startTime, String endTime, String granularity) {
+        StoreDO st = storeMapper.selectById(storeId);
+        if (st == null) return null;
+
+        LocalDateTime start = parseDt(startTime);
+        LocalDateTime end = parseDt(endTime);
+        if (start == null) start = LocalDateTime.now().minusDays(7);
+        if (end == null) end = LocalDateTime.now();
+
+        String gran = granularity != null ? granularity : "hour";
+        int rawLimit = "raw".equals(gran) ? 2000 : Integer.MAX_VALUE;
+
+        OpsAdminStoreTimelineResp resp = new OpsAdminStoreTimelineResp();
+        resp.setStoreId(String.valueOf(storeId));
+        resp.setStoreName(st.getStoreName());
+        resp.setStartTime(fmt(start));
+        resp.setEndTime(fmt(end));
+        resp.setGranularity(gran);
+
+        // Lux series
+        List<LuxRecordDO> luxList = luxRecordMapper.selectList(
+                new LambdaQueryWrapper<LuxRecordDO>()
+                        .eq(LuxRecordDO::getStoreId, storeId)
+                        .ge(LuxRecordDO::getCollectTime, start)
+                        .le(LuxRecordDO::getCollectTime, end)
+                        .orderByAsc(LuxRecordDO::getCollectTime));
+        if (luxList.size() > rawLimit) luxList = luxList.subList(luxList.size() - rawLimit, luxList.size());
+        resp.setLuxSeries(aggregateLux(luxList, gran));
+
+        // Duration series
+        List<DurationRecordDO> durList = durationRecordMapper.selectList(
+                new LambdaQueryWrapper<DurationRecordDO>()
+                        .eq(DurationRecordDO::getStoreId, storeId)
+                        .ge(DurationRecordDO::getCollectTime, start)
+                        .le(DurationRecordDO::getCollectTime, end)
+                        .orderByAsc(DurationRecordDO::getCollectTime));
+        if (durList.size() > rawLimit) durList = durList.subList(durList.size() - rawLimit, durList.size());
+        resp.setDurationSeries(aggregateDuration(durList, gran));
+
+        // Brightness/temp history not available (DeviceDO is snapshot only, DurationRecordDO lacks these fields)
+        resp.setBrightnessSeries(List.of());
+        resp.setTempSeries(List.of());
+
+        // Weather series
+        List<WeatherRecordDO> weatherList = weatherRecordMapper.selectList(
+                new LambdaQueryWrapper<WeatherRecordDO>()
+                        .eq(WeatherRecordDO::getStoreId, storeId)
+                        .ge(WeatherRecordDO::getCollectTime, start)
+                        .le(WeatherRecordDO::getCollectTime, end)
+                        .orderByAsc(WeatherRecordDO::getCollectTime));
+        if (weatherList.size() > rawLimit) weatherList = weatherList.subList(weatherList.size() - rawLimit, weatherList.size());
+        resp.setWeatherSeries(aggregateWeather(weatherList, gran));
+
+        return resp;
+    }
+
+    private List<Map<String, Object>> aggregateLux(List<LuxRecordDO> records, String gran) {
+        if (records.isEmpty()) return List.of();
+        if ("raw".equals(gran)) {
+            List<Map<String, Object>> list = new ArrayList<>();
+            for (LuxRecordDO r : records) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("time", fmt(r.getCollectTime()));
+                m.put("avgLux", r.getLuxValue());
+                m.put("maxLux", r.getLuxValue());
+                m.put("minLux", r.getLuxValue());
+                m.put("count", 1);
+                list.add(m);
+            }
+            return list;
+        }
+        return luxBucket(records, gran);
+    }
+
+    private List<Map<String, Object>> luxBucket(List<LuxRecordDO> records, String gran) {
+        Map<String, List<BigDecimal>> buckets = new LinkedHashMap<>();
+        for (LuxRecordDO r : records) {
+            String key = bucketKey(r.getCollectTime(), gran);
+            buckets.computeIfAbsent(key, k -> new ArrayList<>()).add(r.getLuxValue() != null ? r.getLuxValue() : BigDecimal.ZERO);
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var e : buckets.entrySet()) {
+            List<BigDecimal> vals = e.getValue();
+            BigDecimal sum = vals.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal avg = sum.divide(BigDecimal.valueOf(vals.size()), 2, RoundingMode.HALF_UP);
+            BigDecimal max = vals.stream().max(BigDecimal::compareTo).orElse(BigDecimal.ZERO);
+            BigDecimal min = vals.stream().min(BigDecimal::compareTo).orElse(BigDecimal.ZERO);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("time", e.getKey());
+            m.put("avgLux", avg);
+            m.put("maxLux", max);
+            m.put("minLux", min);
+            m.put("count", vals.size());
+            result.add(m);
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> aggregateDuration(List<DurationRecordDO> records, String gran) {
+        if (records.isEmpty()) return List.of();
+        if ("raw".equals(gran)) {
+            List<Map<String, Object>> list = new ArrayList<>();
+            for (DurationRecordDO r : records) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("time", fmt(r.getCollectTime()));
+                m.put("durationMinutes", r.getDurationValue() != null ? r.getDurationValue() / 60000 : 0);
+                m.put("deviceCount", 1);
+                list.add(m);
+            }
+            return list;
+        }
+        Map<String, List<Long>> buckets = new LinkedHashMap<>();
+        for (DurationRecordDO r : records) {
+            String key = bucketKey(r.getCollectTime(), gran);
+            buckets.computeIfAbsent(key, k -> new ArrayList<>()).add(r.getDurationValue() != null ? r.getDurationValue() : 0L);
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var e : buckets.entrySet()) {
+            long total = e.getValue().stream().mapToLong(Long::longValue).sum();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("time", e.getKey());
+            m.put("durationMinutes", total / 60000);
+            m.put("deviceCount", e.getValue().size());
+            result.add(m);
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> aggregateWeather(List<WeatherRecordDO> records, String gran) {
+        if (records.isEmpty()) return List.of();
+        if ("raw".equals(gran)) {
+            List<Map<String, Object>> list = new ArrayList<>();
+            for (WeatherRecordDO r : records) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("time", fmt(r.getCollectTime()));
+                m.put("weatherText", r.getWeatherText());
+                m.put("outdoorTemp", r.getTemperature());
+                m.put("apparentTemp", r.getApparentTemperature());
+                m.put("humidity", r.getHumidity());
+                m.put("windSpeed", r.getWindSpeed());
+                list.add(m);
+            }
+            return list;
+        }
+        Map<String, List<WeatherRecordDO>> buckets = new LinkedHashMap<>();
+        for (WeatherRecordDO r : records) {
+            String key = bucketKey(r.getCollectTime(), gran);
+            buckets.computeIfAbsent(key, k -> new ArrayList<>()).add(r);
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var e : buckets.entrySet()) {
+            List<WeatherRecordDO> list = e.getValue();
+            WeatherRecordDO latest = list.get(list.size() - 1);
+            BigDecimal avgTemp = list.stream().map(WeatherRecordDO::getTemperature).filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .divide(BigDecimal.valueOf(list.size()), 1, RoundingMode.HALF_UP);
+            BigDecimal avgHumidity = list.stream().map(WeatherRecordDO::getHumidity).filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .divide(BigDecimal.valueOf(list.size()), 1, RoundingMode.HALF_UP);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("time", e.getKey());
+            m.put("weatherText", latest.getWeatherText());
+            m.put("outdoorTemp", avgTemp);
+            m.put("apparentTemp", latest.getApparentTemperature());
+            m.put("humidity", avgHumidity);
+            m.put("windSpeed", latest.getWindSpeed());
+            result.add(m);
+        }
+        return result;
+    }
+
+    private String bucketKey(LocalDateTime dt, String gran) {
+        if ("day".equals(gran)) return dt.toLocalDate().toString();
+        // hour
+        return dt.toLocalDate().toString() + " " + String.format("%02d:00", dt.getHour());
+    }
 }

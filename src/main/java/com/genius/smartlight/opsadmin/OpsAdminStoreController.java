@@ -87,4 +87,20 @@ public class OpsAdminStoreController {
             return ApiResponse.fail("导出时间序列数据失败: " + e.getMessage());
         }
     }
+
+    @GetMapping("/{storeId}/timeline")
+    public ApiResponse<OpsAdminStoreTimelineResp> timeline(
+            @PathVariable Long storeId,
+            @RequestParam(required = false) String startTime,
+            @RequestParam(required = false) String endTime,
+            @RequestParam(required = false) String granularity) {
+        try {
+            OpsAdminStoreTimelineResp resp = storeService.timeline(storeId, startTime, endTime, granularity);
+            if (resp == null) return new ApiResponse<>(404, null, "店铺不存在");
+            return ApiResponse.success(resp);
+        } catch (Exception e) {
+            log.warn("[ops-admin] Failed to query store timeline storeId={}: {}", storeId, e.getMessage());
+            return ApiResponse.fail("查询时间线数据失败: " + e.getMessage());
+        }
+    }
 }

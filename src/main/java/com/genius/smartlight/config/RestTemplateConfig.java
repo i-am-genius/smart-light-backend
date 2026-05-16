@@ -31,6 +31,11 @@ public class RestTemplateConfig {
         return createRestTemplate(AI_READ_TIMEOUT);
     }
 
+    @Bean("healthCheckRestTemplate")
+    public RestTemplate healthCheckRestTemplate() {
+        return createRestTemplate(Duration.ofSeconds(2));
+    }
+
     private RestTemplate createRestTemplate(Duration readTimeout) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(CONNECT_TIMEOUT);

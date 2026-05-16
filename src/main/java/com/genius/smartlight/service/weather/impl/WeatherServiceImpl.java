@@ -77,7 +77,8 @@ public class WeatherServiceImpl implements WeatherService {
             try {
                 collectForStore(store);
             } catch (Exception ex) {
-                log.warn("Collect weather failed, storeId={}", store.getId(), ex);
+                log.warn("Collect weather failed, storeId={}, city={}, lat={}, lng={}",
+                        store.getId(), store.getCity(), store.getLatitude(), store.getLongitude(), ex);
             }
         }
     }
@@ -107,6 +108,47 @@ public class WeatherServiceImpl implements WeatherService {
         );
     }
 
+    private String fetchWeatherWithRetry(String url, Long storeId) {
+        int maxAttempts = 3;
+        Exception lastEx = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return restTemplate.getForObject(url, String.class);
+            } catch (ResourceAccessException ex) {
+                // Timeout / connection reset / read timed out
+                lastEx = ex;
+                String reason = ex.getMessage() != null ? ex.getMessage() : "timeout";
+                if (reason.length() > 60) reason = reason.substring(0, 60);
+                if (attempt < maxAttempts) {
+                    log.warn("Weather request failed, retrying, storeId={}, attempt={}/{}, reason={}",
+                            storeId, attempt, maxAttempts, reason);
+                    sleepMs(attempt == 1 ? 500 : 1000);
+                }
+            } catch (RestClientException ex) {
+                // Check for 502/503/504
+                String msg = ex.getMessage() != null ? ex.getMessage() : "";
+                boolean retryable = msg.contains("502") || msg.contains("503") || msg.contains("504");
+                if (retryable && attempt < maxAttempts) {
+                    lastEx = ex;
+                    String reason = msg.length() > 80 ? msg.substring(0, 80) : msg;
+                    log.warn("Weather request failed, retrying, storeId={}, attempt={}/{}, reason={}",
+                            storeId, attempt, maxAttempts, reason);
+                    sleepMs(attempt == 1 ? 500 : 1000);
+                } else {
+                    log.warn("Weather API request failed, storeId={}", storeId, ex);
+                    throw new ServiceException("天气接口调用失败：" + ex.getMessage());
+                }
+            }
+        }
+        // All retries exhausted
+        log.warn("Weather API all retries exhausted, storeId={}", storeId, lastEx);
+        throw new ServiceException("天气接口连接超时或不可用，已重试" + (maxAttempts - 1) + "次，请稍后重试");
+    }
+
+    private void sleepMs(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+    }
+
     private WeatherRecordDO collectForStore(StoreDO store) {
         if (store.getLatitude() == null || store.getLongitude() == null) {
             throw new ServiceException("店铺缺少经纬度，无法采集天气");
@@ -123,16 +165,7 @@ public class WeatherServiceImpl implements WeatherService {
                 .build()
                 .toUriString();
 
-        String raw;
-        try {
-            raw = restTemplate.getForObject(url, String.class);
-        } catch (ResourceAccessException ex) {
-            log.warn("Weather API timeout or connection failed, storeId={}", store.getId(), ex);
-            throw new ServiceException("天气接口连接超时或不可用，请稍后重试");
-        } catch (RestClientException ex) {
-            log.warn("Weather API request failed, storeId={}", store.getId(), ex);
-            throw new ServiceException("天气接口调用失败：" + ex.getMessage());
-        }
+        String raw = fetchWeatherWithRetry(url, store.getId());
         if (raw == null || raw.isBlank()) {
             throw new ServiceException("天气接口返回为空");
         }

@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -551,6 +552,7 @@ public class OpsAdminStoreService {
                         .orderByAsc(WeatherRecordDO::getCollectTime));
         if (weatherList.size() > rawLimit) weatherList = weatherList.subList(weatherList.size() - rawLimit, weatherList.size());
         resp.setWeatherSeries(aggregateWeather(weatherList, gran));
+        resp.setWeatherMeta(buildWeatherMeta(weatherList, gran, start, end));
 
         return resp;
     }
@@ -668,6 +670,36 @@ public class OpsAdminStoreService {
             result.add(m);
         }
         return result;
+    }
+
+    private Map<String, Object> buildWeatherMeta(List<WeatherRecordDO> weatherList, String gran,
+                                                   LocalDateTime start, LocalDateTime end) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("hasData", !weatherList.isEmpty());
+        meta.put("pointCount", weatherList.size());
+        meta.put("latestWeatherTime", weatherList.isEmpty() ? null : fmt(weatherList.get(weatherList.size() - 1).getCollectTime()));
+
+        // Check completeness
+        if (weatherList.isEmpty()) {
+            meta.put("missingHint", "当前时间范围内暂无天气记录");
+            meta.put("stale", true);
+        } else {
+            long expectedPoints = estimateExpectedPoints(start, end, gran);
+            if (weatherList.size() < expectedPoints * 0.6) {
+                meta.put("missingHint", "天气记录数量较少，可能存在接口 502、网络波动或采集失败");
+                meta.put("stale", true);
+            } else {
+                meta.put("stale", false);
+            }
+        }
+        return meta;
+    }
+
+    private long estimateExpectedPoints(LocalDateTime start, LocalDateTime end, String gran) {
+        long hours = java.time.Duration.between(start, end).toHours();
+        if (hours <= 0) return 1;
+        if ("day".equals(gran)) return Math.max(1, hours / 24);
+        return Math.max(1, hours);
     }
 
     private String bucketKey(LocalDateTime dt, String gran) {

@@ -16,4 +16,5 @@ public class OpsAdminStoreTimelineResp {
     private List<Map<String, Object>> brightnessSeries;
     private List<Map<String, Object>> tempSeries;
     private List<Map<String, Object>> weatherSeries;
+    private Map<String, Object> weatherMeta;
 }

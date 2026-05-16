@@ -60,6 +60,68 @@ public class OpsAdminLogReadService {
         return allowedTypes.contains(logType);
     }
 
+    private static final int MAX_VISIBLE_CHARS = 200 * 1024;
+
+    public LogReadResult readFromVisibleLogs(List<String> visibleLogs, LogReadRequest req) {
+        LogReadResult result = new LogReadResult();
+        if (visibleLogs == null || visibleLogs.isEmpty()) return result;
+
+        int maxLines = Math.min(req.getMaxLines(), 2000);
+        if (maxLines < 1) maxLines = 500;
+
+        Set<String> levels = req.getLevels() != null && !req.getLevels().isEmpty()
+                ? new HashSet<>(req.getLevels().stream().map(String::toUpperCase).toList())
+                : Collections.emptySet();
+        String kw = req.getKeyword() != null ? req.getKeyword().toLowerCase(Locale.ROOT) : null;
+        OpsAdminLogSanitizer sanitizer = req.getSanitizer();
+
+        List<String> allLines = new ArrayList<>();
+        List<String> priorityLines = new ArrayList<>();
+        int totalChars = 0;
+        boolean truncated = false;
+
+        for (String raw : visibleLogs) {
+            if (raw == null || raw.isEmpty()) continue;
+
+            // Safety: cap total input size
+            totalChars += raw.length();
+            if (totalChars > MAX_VISIBLE_CHARS) {
+                truncated = true;
+                break;
+            }
+
+            if (!levelMatches(raw, levels)) continue;
+            if (!keywordMatches(raw, kw)) continue;
+
+            String sanitized = sanitizer != null ? sanitizer.sanitize(raw) : raw;
+            if (isPriorityLine(raw)) {
+                if (priorityLines.size() + allLines.size() < maxLines) {
+                    priorityLines.add(sanitized);
+                } else {
+                    truncated = true;
+                    break;
+                }
+            } else {
+                allLines.add(sanitized);
+            }
+        }
+
+        List<String> merged = new ArrayList<>(priorityLines);
+        int remaining = maxLines - merged.size();
+        if (remaining > 0) {
+            int take = Math.min(remaining, allLines.size());
+            merged.addAll(allLines.subList(0, take));
+        } else if (merged.size() > maxLines) {
+            merged = merged.subList(0, maxLines);
+        }
+
+        int totalAfterFilter = priorityLines.size() + allLines.size();
+        result.lines = merged;
+        result.truncated = truncated || totalAfterFilter > maxLines;
+        result.analyzedLineCount = merged.size();
+        return result;
+    }
+
     public LogReadResult read(LogReadRequest req) {
         LogReadResult result = new LogReadResult();
         String path = logTypeToPath.get(req.getLogType());

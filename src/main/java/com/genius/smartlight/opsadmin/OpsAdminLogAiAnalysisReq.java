@@ -25,6 +25,8 @@ public class OpsAdminLogAiAnalysisReq {
 
     private String analysisMode = "diagnose";
 
+    private List<String> visibleLogs;
+
     public String getLogType() { return logType; }
     public void setLogType(String v) { this.logType = v; }
     public String getStartTime() { return startTime; }
@@ -39,4 +41,6 @@ public class OpsAdminLogAiAnalysisReq {
     public void setMaxLines(int v) { this.maxLines = v; }
     public String getAnalysisMode() { return analysisMode; }
     public void setAnalysisMode(String v) { this.analysisMode = v; }
+    public List<String> getVisibleLogs() { return visibleLogs; }
+    public void setVisibleLogs(List<String> v) { this.visibleLogs = v; }
 }

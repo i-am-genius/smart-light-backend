@@ -66,7 +66,12 @@ public class OpsAdminLogAiAnalysisService {
         readReq.setMaxLines(maxLines);
         readReq.setSanitizer(sanitizer);
 
-        OpsAdminLogReadService.LogReadResult readResult = logReadService.read(readReq);
+        OpsAdminLogReadService.LogReadResult readResult;
+        if (req.getVisibleLogs() != null && !req.getVisibleLogs().isEmpty()) {
+            readResult = logReadService.readFromVisibleLogs(req.getVisibleLogs(), readReq);
+        } else {
+            readResult = logReadService.read(readReq);
+        }
         List<String> lines = readResult.lines;
 
         OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult = ruleAnalyzer.analyze(lines, req.getAnalysisMode());

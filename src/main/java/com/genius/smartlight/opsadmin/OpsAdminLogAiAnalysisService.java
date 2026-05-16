@@ -1,5 +1,7 @@
 package com.genius.smartlight.opsadmin;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -18,6 +20,7 @@ public class OpsAdminLogAiAnalysisService {
 
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.of("Asia/Shanghai"));
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final OpsAdminLogReadService logReadService;
     private final OpsAdminLogRuleAnalyzer ruleAnalyzer;
@@ -97,7 +100,55 @@ public class OpsAdminLogAiAnalysisService {
         return aiEnabled && !aiBaseUrl.isBlank() && !aiApiKey.isBlank();
     }
 
+    // ─── AI call + parse ────────────────────────────────────────────
+
     private void aiAugment(OpsAdminLogAiAnalysisResp resp, List<String> lines, String mode) {
+        String aiText = callAi(lines, mode);
+        Map<String, Object> parsed = parseAiJson(aiText);
+
+        if (parsed == null) {
+            log.warn("[ops-admin] AI returned non-JSON, using rule result");
+            return;
+        }
+
+        String aiSummary = str(parsed, "summary");
+        if (aiSummary != null && !aiSummary.isBlank()) {
+            resp.setSummary(aiSummary);
+        }
+
+        String aiLevel = str(parsed, "level");
+        if (aiLevel != null && !aiLevel.isBlank()) {
+            resp.setLevel(normalizeLevel(aiLevel));
+        }
+
+        List<Map<String, Object>> rawProblems = list(parsed, "problems");
+        if (rawProblems != null && !rawProblems.isEmpty()) {
+            List<OpsAdminLogAiAnalysisResp.LogProblem> problems = new ArrayList<>();
+            for (Map<String, Object> rp : rawProblems) {
+                OpsAdminLogAiAnalysisResp.LogProblem p = new OpsAdminLogAiAnalysisResp.LogProblem();
+                p.setTitle(str(rp, "title"));
+                p.setSeverity(normalizeSeverity(str(rp, "severity")));
+                p.setReason(str(rp, "reason"));
+                p.setImpact(str(rp, "impact"));
+                p.setSuggestion(str(rp, "suggestion"));
+                p.setEvidence(stringList(rp, "evidence"));
+                problems.add(p);
+            }
+            resp.setProblems(problems);
+        }
+
+        List<String> aiSuggestions = stringList(parsed, "suggestions");
+        if (!aiSuggestions.isEmpty()) {
+            resp.setSuggestions(aiSuggestions);
+        }
+
+        List<String> aiRelated = stringList(parsed, "relatedLogs");
+        if (!aiRelated.isEmpty()) {
+            resp.setRelatedLogs(aiRelated);
+        }
+    }
+
+    private String callAi(List<String> lines, String mode) {
         String systemPrompt = buildSystemPrompt(mode);
         String userPrompt = buildUserPrompt(lines, mode);
 
@@ -138,33 +189,144 @@ public class OpsAdminLogAiAnalysisService {
                 if (message != null) {
                     String content = (String) message.get("content");
                     if (content != null && !content.isBlank()) {
-                        resp.setSummary(resp.getSummary() + " [AI] " + content);
+                        return content;
                     }
                 }
             }
         }
+        return "";
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseAiJson(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String json = raw.trim();
+
+        // Strip ```json ... ``` code fences
+        if (json.startsWith("```")) {
+            int start = json.indexOf('\n');
+            int end = json.lastIndexOf("```");
+            if (start >= 0 && end > start) {
+                json = json.substring(start, end).trim();
+            }
+        }
+
+        try {
+            return MAPPER.readValue(json, new TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            log.debug("[ops-admin] AI response is not valid JSON, raw length={}", raw.length());
+            return null;
+        }
+    }
+
+    // ─── Prompt builders ────────────────────────────────────────────
+
     private String buildSystemPrompt(String mode) {
-        String base = "You are a DevOps log analysis expert. Analyze the following logs and provide concise diagnosis.";
+        return "你是服务器运维日志分析助手。请根据日志内容输出严格 JSON，不要输出 Markdown，不要输出代码块，不要输出多余解释文字。\n"
+                + buildModeInstruction(mode)
+                + "\n\n返回格式必须是：\n"
+                + "{\n"
+                + "  \"summary\": \"不超过120字的总体结论\",\n"
+                + "  \"level\": \"normal|warning|danger\",\n"
+                + "  \"problems\": [\n"
+                + "    {\n"
+                + "      \"title\": \"问题标题\",\n"
+                + "      \"severity\": \"low|medium|high|critical\",\n"
+                + "      \"reason\": \"原因\",\n"
+                + "      \"impact\": \"影响\",\n"
+                + "      \"suggestion\": \"处理建议\",\n"
+                + "      \"evidence\": [\"相关日志片段，原样引用，不超过3条\"]\n"
+                + "    }\n"
+                + "  ],\n"
+                + "  \"suggestions\": [\"综合建议1\", \"综合建议2\"],\n"
+                + "  \"relatedLogs\": [\"关键日志原文，不超过10条\"]\n"
+                + "}\n\n"
+                + "如果没有发现明显问题，返回：\n"
+                + "{\"summary\":\"当前日志未发现明显致命错误。\",\"level\":\"normal\",\"problems\":[],\"suggestions\":[],\"relatedLogs\":[]}";
+    }
+
+    private String buildModeInstruction(String mode) {
         return switch (mode != null ? mode : "diagnose") {
-            case "security" -> base + " Focus on security risks: auth failures, permissions, sensitive info leaks.";
-            case "performance" -> base + " Focus on performance: slow queries, timeouts, memory, connection pools.";
-            case "summary" -> base + " Provide overall summary and key metrics.";
-            default -> base + " Focus on errors and exceptions, root cause and fix suggestions.";
+            case "summary" ->
+                "【概览总结模式】总结日志整体状态，不要展开太多细节。summary 控制在120字以内，problems 最多3个。只关注最突出的问题。";
+
+            case "diagnose" ->
+                "【故障诊断模式】重点找出故障原因和异常链路，给出具体修复步骤。problems 要详细，包含 reason/impact/suggestion。注意关联错误与上游调用，找出根因。";
+
+            case "security" ->
+                "【安全风险分析模式】只关注安全相关问题：token 泄露、password/secret 明文、鉴权失败(401/403)、暴力尝试、敏感信息泄露、权限绕过。忽略普通业务日志和一般性告警。如果没有发现安全风险，明确说未发现明显安全风险。";
+
+            case "performance" ->
+                "【性能问题分析模式】只关注性能：timeout、慢请求(slow)、高耗时、连接池耗尽、OOM、GC停顿、CPU飙升、数据库慢查询、大对象分配。如果没有性能瓶颈，明确说未发现明显性能瓶颈。";
+
+            default ->
+                "【故障诊断模式】重点找出故障原因和异常链路，给出具体修复步骤。problems 要详细。";
         };
     }
 
     private String buildUserPrompt(List<String> lines, String mode) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Analyze following server log lines, total ").append(lines.size()).append(" lines:\n\n");
-        sb.append("```\n");
+        sb.append("以下是服务器日志，共 ").append(lines.size()).append(" 行：\n\n```\n");
         for (String line : lines) {
             sb.append(line).append('\n');
         }
-        sb.append("```\n");
-        sb.append("Return JSON: {\"summary\":\"...\", \"findings\":[...]}");
+        sb.append("```\n\n");
+        sb.append("请严格按照要求的 JSON 格式输出分析结果，不要输出其他内容。");
         return sb.toString();
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────
+
+    private String normalizeLevel(String lv) {
+        if (lv == null) return "warning";
+        return switch (lv.toLowerCase(Locale.ROOT)) {
+            case "normal", "info", "ok" -> "normal";
+            case "warning", "warn" -> "warning";
+            case "danger", "error", "critical" -> "error";
+            default -> "warning";
+        };
+    }
+
+    private String normalizeSeverity(String s) {
+        if (s == null) return "medium";
+        return switch (s.toLowerCase(Locale.ROOT)) {
+            case "low", "info" -> "low";
+            case "medium", "warn", "warning" -> "medium";
+            case "high" -> "high";
+            case "critical", "fatal" -> "critical";
+            default -> "medium";
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String str(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        return v instanceof String ? (String) v : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> list(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        if (v instanceof List<?> list) {
+            if (!list.isEmpty() && list.get(0) instanceof Map) {
+                return (List<Map<String, Object>>) list;
+            }
+        }
+        return Collections.emptyList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> stringList(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        if (v instanceof List<?> list) {
+            List<String> result = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof String s) result.add(s);
+                else if (item instanceof Map) result.add(item.toString());
+            }
+            return result;
+        }
+        return Collections.emptyList();
     }
 
     private static boolean boolEnv(String key) {

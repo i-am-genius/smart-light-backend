@@ -1,5 +1,6 @@
 package com.genius.smartlight.security;
 
+import com.genius.smartlight.common.RequestLogUtils;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -28,6 +29,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
+        // Skip /ops-admin/** — handled by OpsAdminAuthFilter with its own JWT secret
+        String path = request.getRequestURI();
+        if (path != null && (path.equals("/ops-admin") || path.startsWith("/ops-admin/"))) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
         String token = resolveToken(request);
 
         if (token != null && !token.isBlank()) {
@@ -42,8 +50,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                         );
 
                 SecurityContextHolder.getContext().setAuthentication(authentication);
-            } catch (Exception ignored) {
-                // Invalid token is ignored and handled later by Spring Security.
+            } catch (Exception e) {
+                String reason = e.getMessage() != null ? e.getMessage().substring(0, Math.min(40, e.getMessage().length())) : "invalid";
+                log.warn("Auth failed, reason={}, {}", reason, RequestLogUtils.logContext(request));
             }
         }
 
@@ -64,7 +73,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
             String queryToken = request.getParameter("token");
             if (queryToken != null && !queryToken.isBlank()) {
-                log.warn("WebSocket token from query parameter is deprecated");
+                log.warn("WebSocket token from query parameter is deprecated, {}",
+                        RequestLogUtils.logContext(request));
                 return queryToken;
             }
         }

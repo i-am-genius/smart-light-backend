@@ -22,7 +22,8 @@ public class OpsAdminLogController {
             @RequestParam(defaultValue = "200") int lines,
             @RequestParam(defaultValue = "ALL") String level,
             @RequestParam(defaultValue = "") String keyword,
-            @RequestParam(defaultValue = "ALL") String module) {
-        return ApiResponse.success(logService.tail(type, lines, level, keyword, module));
+            @RequestParam(defaultValue = "ALL") String module,
+            @RequestParam(defaultValue = "") String date) {
+        return ApiResponse.success(logService.tail(type, lines, level, keyword, module, date));
     }
 }

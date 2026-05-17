@@ -26,6 +26,9 @@ public class OpsAdminLogAiAnalysisReq {
     private String analysisMode = "diagnose";
 
     private List<String> visibleLogs;
+    private Boolean detailMode;
+    private String displayOrder;
+    private Boolean onlyErrorWarn;
 
     public String getLogType() { return logType; }
     public void setLogType(String v) { this.logType = v; }
@@ -43,4 +46,10 @@ public class OpsAdminLogAiAnalysisReq {
     public void setAnalysisMode(String v) { this.analysisMode = v; }
     public List<String> getVisibleLogs() { return visibleLogs; }
     public void setVisibleLogs(List<String> v) { this.visibleLogs = v; }
+    public Boolean getDetailMode() { return detailMode; }
+    public void setDetailMode(Boolean v) { this.detailMode = v; }
+    public String getDisplayOrder() { return displayOrder; }
+    public void setDisplayOrder(String v) { this.displayOrder = v; }
+    public Boolean getOnlyErrorWarn() { return onlyErrorWarn; }
+    public void setOnlyErrorWarn(Boolean v) { this.onlyErrorWarn = v; }
 }

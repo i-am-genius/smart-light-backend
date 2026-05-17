@@ -13,10 +13,24 @@ public class OpsAdminLogAiAnalysisResp {
     private List<String> suggestions;
     private List<String> relatedLogs;
     private int analyzedLineCount;
+    private int analyzedEventCount;
     private boolean truncated;
     private String analysisTime;
+    private TraceAnalysis traceAnalysis;
     private boolean aiEnabled;
     private boolean fallbackUsed;
+    private String analysisEngine;
+    private String fallbackReason;
+
+    @Data
+    public static class TraceAnalysis {
+        private String entryPoint;
+        private List<String> projectCallChain;
+        private String layerType;
+        private String repeatedLocation;
+        private String rootCauseCategory;
+        private String stackSummary;
+    }
 
     @Data
     public static class LogProblem {

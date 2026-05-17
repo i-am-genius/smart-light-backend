@@ -34,6 +34,7 @@ build/
 
 ### Project-specific ###
 src/main/resources/application.yaml
+src/main/resources/application-example.yaml
 data/
 logs/
 *.log
@@ -42,3 +43,12 @@ logs/
 .env.*
 uploads/
 .DS_Store
+*.backup
+*.backup2
+
+CLAUDE.md
+.claude/settings.local.json
+src/main/resources/application.yml
+
+CLAUDE.md
+.claude/settings.local.json

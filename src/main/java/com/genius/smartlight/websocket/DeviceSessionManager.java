@@ -41,11 +41,11 @@ public class DeviceSessionManager {
             try {
                 oldSession.close();
             } catch (IOException e) {
-                log.warn("Close old device session failed, chipId={}", normalizedChipId, e);
+                log.warn("[ws] event=close_old_session_failed, wsType=device, chipId={}, errorMsg={}", normalizedChipId, e.getMessage());
             }
         }
 
-        log.info("Device registered: chipId={}, sessionId={}", normalizedChipId, session.getId());
+        // device_registered logged by DeviceWebSocketHandler
     }
 
     public void touch(String chipId) {
@@ -113,7 +113,8 @@ public class DeviceSessionManager {
             log.debug("sendToDevice success: chipId={}", trackedChipId);
             return true;
         } catch (IOException e) {
-            log.error("sendToDevice IOException: chipId={}, error={}", trackedChipId, e.getMessage(), e);
+            log.error("[ws] event=send_failed, wsType=device, chipId={}, errorType={}, errorMsg={}",
+                    trackedChipId, e.getClass().getSimpleName(), e.getMessage());
             return false;
         }
     }
@@ -131,9 +132,9 @@ public class DeviceSessionManager {
 
         if (targetChipId != null) {
             deviceSessionMap.remove(targetChipId, session);
-            log.info("Device disconnected: chipId={}, sessionId={}", targetChipId, session.getId());
+            // disconnected logged by DeviceWebSocketHandler
         } else {
-            log.info("Anonymous or unregistered device websocket disconnected: sessionId={}", session.getId());
+            log.info("[ws] event=disconnected, wsType=device, sessionId={}, chipId=unregistered", session.getId());
         }
         return targetChipId;
     }

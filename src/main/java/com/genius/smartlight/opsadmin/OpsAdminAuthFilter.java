@@ -1,5 +1,6 @@
 package com.genius.smartlight.opsadmin;
 
+import com.genius.smartlight.common.RequestLogUtils;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -45,6 +46,7 @@ public class OpsAdminAuthFilter extends OncePerRequestFilter {
 
         String token = resolveToken(request);
         if (token == null || token.isBlank()) {
+            log.warn("[ops-admin] Auth failed: no token, {}", RequestLogUtils.logContext(request));
             response.setContentType("application/json;charset=UTF-8");
             response.setStatus(401);
             response.getWriter().write("{\"code\":401,\"msg\":\"未登录\"}");
@@ -61,6 +63,7 @@ public class OpsAdminAuthFilter extends OncePerRequestFilter {
                     );
             SecurityContextHolder.getContext().setAuthentication(authentication);
         } catch (Exception e) {
+            log.warn("[ops-admin] Auth failed: invalid/expired token, {}", RequestLogUtils.logContext(request));
             response.setContentType("application/json;charset=UTF-8");
             response.setStatus(401);
             response.getWriter().write("{\"code\":401,\"msg\":\"token无效或已过期\"}");

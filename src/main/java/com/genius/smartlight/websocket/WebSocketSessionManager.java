@@ -19,7 +19,7 @@ public class WebSocketSessionManager {
 
     public void addSession(WebSocketSession session) {
         sessions.put(session.getId(), session);
-        log.info("WebSocket connected: sessionId={}", session.getId());
+        // connection logged by AppWebSocketHandler
     }
 
     public void registerStore(String sessionId, Long storeId) {
@@ -38,7 +38,7 @@ public class WebSocketSessionManager {
         sessions.remove(session.getId());
         sessionStoreMap.remove(session.getId());
         sessionUserMap.remove(session.getId());
-        log.info("WebSocket disconnected: sessionId={}", session.getId());
+        // disconnection logged by AppWebSocketHandler
     }
 
     public int getSessionCount() {
@@ -52,7 +52,8 @@ public class WebSocketSessionManager {
         try {
             session.sendMessage(new TextMessage(payload));
         } catch (IOException e) {
-            log.error("WebSocket send failed: sessionId={}", session.getId(), e);
+            log.error("[ws] event=send_failed, sessionId={}, errorType={}, errorMsg={}",
+                    session.getId(), e.getClass().getSimpleName(), e.getMessage());
         }
     }
 

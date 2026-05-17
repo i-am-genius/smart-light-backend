@@ -20,6 +20,8 @@ public class OpsAdminLogReadService {
 
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final Pattern LOG_START = Pattern.compile("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} ");
+    private static final Pattern LOG_LEVEL_PATTERN = Pattern.compile(
+            "^\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+\\[[^\\]]*\\]\\s+(ERROR|WARN|INFO|DEBUG|TRACE)\\b");
     private static final Pattern EXCEPTION_CONTINUATION = Pattern.compile(
             "^(Caused by|\\s+at |\\t|Suppressed:|\\s+\\.\\.\\. \\d+ (more|common frames)|[\\w.]+Exception|\\s+\\[\\w+\\])"
     );
@@ -75,50 +77,38 @@ public class OpsAdminLogReadService {
         String kw = req.getKeyword() != null ? req.getKeyword().toLowerCase(Locale.ROOT) : null;
         OpsAdminLogSanitizer sanitizer = req.getSanitizer();
 
-        List<String> allLines = new ArrayList<>();
-        List<String> priorityLines = new ArrayList<>();
-        int totalChars = 0;
+        // Group into events first, then filter entire events by level
+        String fullText = String.join("\n", visibleLogs);
+        List<OpsAdminLogService.LogEvent> events = OpsAdminLogService.groupLogEvents(fullText);
+
+        List<String> merged = new ArrayList<>();
         boolean truncated = false;
+        int eventCount = 0;
 
-        for (String raw : visibleLogs) {
-            if (raw == null || raw.isEmpty()) continue;
-
-            // Safety: cap total input size
-            totalChars += raw.length();
-            if (totalChars > MAX_VISIBLE_CHARS) {
-                truncated = true;
-                break;
-            }
-
-            if (!levelMatches(raw, levels)) continue;
-            if (!keywordMatches(raw, kw)) continue;
-
-            String sanitized = sanitizer != null ? sanitizer.sanitize(raw) : raw;
-            if (isPriorityLine(raw)) {
-                if (priorityLines.size() + allLines.size() < maxLines) {
-                    priorityLines.add(sanitized);
-                } else {
-                    truncated = true;
-                    break;
+        for (OpsAdminLogService.LogEvent ev : events) {
+            if (merged.size() >= maxLines) { truncated = true; break; }
+            // Filter by level: keep entire event (including stacks) if event level matches
+            if (!levels.isEmpty() && !levels.contains(ev.level != null ? ev.level : "INFO")) continue;
+            // Filter by keyword: keep event if any line matches
+            if (kw != null && !kw.isEmpty()) {
+                boolean matches = false;
+                for (String l : ev.lines) {
+                    if (l.toLowerCase(Locale.ROOT).contains(kw)) { matches = true; break; }
                 }
-            } else {
-                allLines.add(sanitized);
+                if (!matches) continue;
+            }
+            eventCount++;
+            for (String line : ev.lines) {
+                if (merged.size() >= maxLines) { truncated = true; break; }
+                String s = sanitizer != null ? sanitizer.sanitize(line) : line;
+                merged.add(s);
             }
         }
 
-        List<String> merged = new ArrayList<>(priorityLines);
-        int remaining = maxLines - merged.size();
-        if (remaining > 0) {
-            int take = Math.min(remaining, allLines.size());
-            merged.addAll(allLines.subList(0, take));
-        } else if (merged.size() > maxLines) {
-            merged = merged.subList(0, maxLines);
-        }
-
-        int totalAfterFilter = priorityLines.size() + allLines.size();
         result.lines = merged;
-        result.truncated = truncated || totalAfterFilter > maxLines;
+        result.truncated = truncated;
         result.analyzedLineCount = merged.size();
+        result.analyzedEventCount = eventCount;
         return result;
     }
 
@@ -206,10 +196,8 @@ public class OpsAdminLogReadService {
 
     private boolean levelMatches(String line, Set<String> levels) {
         if (levels.isEmpty()) return true;
-        for (String lv : levels) {
-            if (line.contains(" " + lv + " ")) return true;
-        }
-        return false;
+        java.util.regex.Matcher m = LOG_LEVEL_PATTERN.matcher(line);
+        return m.find() && levels.contains(m.group(1));
     }
 
     private boolean keywordMatches(String line, String keyword) {
@@ -262,5 +250,6 @@ public class OpsAdminLogReadService {
         public List<String> lines = Collections.emptyList();
         public boolean truncated;
         public int analyzedLineCount;
+        public int analyzedEventCount;
     }
 }

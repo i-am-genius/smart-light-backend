@@ -123,25 +123,41 @@ public class OpsAdminLogAiAnalysisService {
 
         boolean aiActuallyUsed = false;
         String fallbackReason = null;
-        if (isAiAvailable()) {
-            try {
-                String displayOrder = req.getDisplayOrder() != null ? req.getDisplayOrder() : "oldestFirst";
-                boolean onlyErrorWarn = Boolean.TRUE.equals(req.getOnlyErrorWarn());
-                aiActuallyUsed = aiAugment(resp, lines, req.getAnalysisMode(), detailMode, req.getLogType(),
-                        displayOrder, onlyErrorWarn);
-                if (!aiActuallyUsed) fallbackReason = "AI returned non-JSON";
-            } catch (Exception e) {
-                fallbackReason = "AI call failed";
-                log.warn("[ops-admin] AI analysis failed, using rule fallback. {}", e.getMessage());
+        String skipReason = null;
+        boolean aiAvailable = isAiAvailable();
+
+        if (aiAvailable) {
+            boolean needAi = (detailMode && hasStacks) || !isRuleEnough(ruleResult, hasStacks);
+            if (needAi) {
+                log.info("[ops-admin] Rule analysis not enough, calling AI, hasStacks={}, detailMode={}, ruleLevel={}, ruleProblems={}, inputLines={}",
+                        hasStacks, detailMode, ruleResult.level, ruleResult.problems.size(), lines.size());
+                try {
+                    String displayOrder = req.getDisplayOrder() != null ? req.getDisplayOrder() : "oldestFirst";
+                    boolean onlyErrorWarn = Boolean.TRUE.equals(req.getOnlyErrorWarn());
+                    aiActuallyUsed = aiAugment(resp, lines, req.getAnalysisMode(), detailMode, req.getLogType(),
+                            displayOrder, onlyErrorWarn);
+                    if (!aiActuallyUsed) fallbackReason = "AI_RETURNED_NON_JSON";
+                } catch (Exception e) {
+                    String errMsg = e.getMessage() != null ? e.getMessage() : "";
+                    String errLower = errMsg.toLowerCase();
+                    fallbackReason = errLower.contains("timed out") || errLower.contains("timeout")
+                            ? "DEEPSEEK_TIMEOUT"
+                            : "AI_CALL_FAILED";
+                    log.warn("[ops-admin] AI analysis failed, using rule fallback. {}", errMsg);
+                }
+            } else {
+                skipReason = "RULE_ENOUGH";
+                log.info("[ops-admin] AI skipped because rule analysis is enough, reason={}, ruleLevel={}, ruleProblems={}, hasStacks={}, detailMode={}, inputLines={}",
+                        skipReason, ruleResult.level, ruleResult.problems.size(), hasStacks, detailMode, lines.size());
             }
         } else {
-            fallbackReason = "AI unavailable";
+            fallbackReason = "AI_UNAVAILABLE";
         }
 
-        resp.setAiEnabled(aiActuallyUsed);
-        resp.setFallbackUsed(!aiActuallyUsed);
+        resp.setAiEnabled(aiAvailable);
+        resp.setFallbackUsed(!aiActuallyUsed && fallbackReason != null);
         resp.setAnalysisEngine(aiActuallyUsed ? "ai" : "rule");
-        resp.setFallbackReason(fallbackReason);
+        resp.setFallbackReason(fallbackReason != null ? fallbackReason : skipReason);
 
         // Fallback traceAnalysis from RuleAnalyzer if AI didn't provide one
         if (resp.getTraceAnalysis() == null && detailMode && diagnosticLines.lines().anyMatch(this::isStackTraceLine)) {
@@ -250,6 +266,26 @@ public class OpsAdminLogAiAnalysisService {
 
     private boolean isAiAvailable() {
         return aiEnabled && !aiBaseUrl.isBlank() && !aiApiKey.isBlank();
+    }
+
+    private boolean isRuleEnough(OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult, boolean hasStacks) {
+        // Rule found concrete problems: enough without AI
+        if (!ruleResult.problems.isEmpty()
+                && ruleResult.level != null
+                && !"normal".equals(ruleResult.level)
+                && !ruleResult.suggestions.isEmpty()
+                && ruleResult.summary != null && !ruleResult.summary.isBlank()
+                && !ruleResult.relatedLogs.isEmpty()) {
+            return true;
+        }
+        // Rule says normal and has no problems: clean log, AI not needed
+        if ("normal".equals(ruleResult.level)
+                && ruleResult.problems.isEmpty()
+                && !hasStacks) {
+            return true;
+        }
+        // Otherwise rule is not enough
+        return false;
     }
 
     // ─── AI call + parse ────────────────────────────────────────────

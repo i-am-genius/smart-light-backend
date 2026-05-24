@@ -28,7 +28,9 @@ public class OpsAdminLogReadService {
     private static final Set<String> PRIORITY_MARKERS = Set.of(
             "ERROR", "WARN", "Exception", "Caused by", "Failed", "Timeout",
             "Denied", "Unauthorized", "SQLSyntaxErrorException", "Error",
-            "Refused", "timed out", "OutOfMemoryError"
+            "Refused", "timed out", "OutOfMemoryError", "TEXT_PARTIAL_WRITING",
+            "broadcastToStore failed", "The remote endpoint was in state",
+            "invalid state for called method", "sendMessage"
     );
 
     private final Map<String, String> logTypeToPath = new LinkedHashMap<>();
@@ -78,8 +80,7 @@ public class OpsAdminLogReadService {
         OpsAdminLogSanitizer sanitizer = req.getSanitizer();
 
         // Group into events first, then filter entire events by level
-        String fullText = String.join("\n", visibleLogs);
-        List<OpsAdminLogService.LogEvent> events = OpsAdminLogService.groupLogEvents(fullText);
+        List<OpsAdminLogService.LogEvent> events = OpsAdminLogService.groupLogEvents(visibleLogs);
 
         List<String> merged = new ArrayList<>();
         boolean truncated = false;

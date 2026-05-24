@@ -103,6 +103,16 @@ public class OpsAdminLogRuleAnalyzer {
           line -> containsAny(line, "Weather API all retries exhausted", "Backup weather provider failed") || (line.contains("weather") && line.contains("fallback") && line.contains("latest valid"))
         ),
 
+        r("high", "WebSocket 并发发送异常",
+          "疑似同一个 WebSocketSession 被多个业务线程并发 sendMessage，Tomcat WebSocket endpoint 不支持并发写。",
+          "浏览器端实时推送可能中断，state、fabricRecognize、onlineStatus、lightEffectState 等消息可能丢失或导致连接异常。",
+          "使用 ConcurrentWebSocketSessionDecorator 或 session 级发送锁，保证同一 session 串行发送；发送失败后清理失效 session，单个 session 失败不要影响其他连接。",
+          line -> containsAny(line, "TEXT_PARTIAL_WRITING", "WebSocket broadcastToStore failed",
+              "The remote endpoint was in state", "invalid state for called method",
+              "ConcurrentWebSocketSessionDecorator")
+              || (containsAny(line, "sendMessage") && containsAny(line, "WebSocket", "WebSocketSession", "broadcastToStore"))
+        ),
+
         // === Medium ===
         r("medium", "接口出现 500 异常",
           "HTTP 接口返回 500 状态码，存在未处理的异常。",
@@ -206,6 +216,13 @@ public class OpsAdminLogRuleAnalyzer {
           "token 可能被日志或中间代理记录泄露。",
           "后续改成首帧认证或更安全的鉴权方式。",
           line -> line.toLowerCase(Locale.ROOT).contains("websocket token") && line.toLowerCase(Locale.ROOT).contains("query parameter")
+        ),
+        r("low", "客户端主动断开响应连接",
+          "HTTP 响应写出时客户端已经刷新、关闭页面或网络断开，通常不是后端业务逻辑错误。",
+          "单独出现时影响较低，当前请求响应无法继续写回客户端。",
+          "如未伴随业务异常、数据库异常或 WebSocket 推送失败，通常无需处理；若频繁出现，检查前端超时、页面刷新和代理超时配置。",
+          line -> containsAny(line, "ClientAbortException", "Broken pipe", "AsyncRequestNotUsableException",
+              "Response not usable after response errors", "Connection reset by peer")
         ),
         r("low", "无害静态资源请求",
           "访问 /、/favicon.ico、/robots.txt 等无害静态资源时未找到。",

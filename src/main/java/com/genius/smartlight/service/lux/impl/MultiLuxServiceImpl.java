@@ -1,36 +1,40 @@
 package com.genius.smartlight.service.lux.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.dataobject.LuxRecordDO;
-import com.genius.smartlight.dal.dataobject.StoreDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.LuxRecordMapper;
-import com.genius.smartlight.dal.mysql.StoreMapper;
-import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.lux.MultiLuxService;
+import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.lux.MultiLuxRespVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 @Service
 @RequiredArgsConstructor
 public class MultiLuxServiceImpl implements MultiLuxService {
 
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
+
     private final DeviceMapper deviceMapper;
     private final LuxRecordMapper luxMapper;
-    private final StoreMapper storeMapper;
-
-    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
+    private final CurrentStoreService currentStoreService;
 
     @Override
     public MultiLuxRespVO getMultiLux() {
-        Long currentStoreId = getCurrentStoreId();
+        Long currentStoreId = currentStoreService.getCurrentStoreId();
 
         List<DeviceDO> devices = deviceMapper.selectList(
                 new LambdaQueryWrapper<DeviceDO>()
@@ -45,21 +49,19 @@ public class MultiLuxServiceImpl implements MultiLuxService {
                     new LambdaQueryWrapper<LuxRecordDO>()
                             .eq(LuxRecordDO::getChipId, device.getChipId())
                             .eq(LuxRecordDO::getStoreId, currentStoreId)
-                            .orderByAsc(LuxRecordDO::getCollectTime)
-                            .orderByAsc(LuxRecordDO::getCreateTime)
+                            .orderByDesc(LuxRecordDO::getCollectTime)
+                            .orderByDesc(LuxRecordDO::getCreateTime)
+                            .last("LIMIT 12")
             );
 
             if (luxList == null || luxList.isEmpty()) {
                 continue;
             }
 
-            List<LuxRecordDO> lastLuxList = luxList.size() > 12
-                    ? luxList.subList(luxList.size() - 12, luxList.size())
-                    : luxList;
+            Collections.reverse(luxList);
+            deviceLuxMap.put(device.getChipId(), luxList);
 
-            deviceLuxMap.put(device.getChipId(), lastLuxList);
-
-            for (LuxRecordDO lux : lastLuxList) {
+            for (LuxRecordDO lux : luxList) {
                 labelSet.add(formatLabel(lux));
             }
         }
@@ -69,55 +71,36 @@ public class MultiLuxServiceImpl implements MultiLuxService {
         respVO.setLabels(labels);
 
         List<MultiLuxRespVO.Dataset> datasets = new ArrayList<>();
-
         for (Map.Entry<String, List<LuxRecordDO>> entry : deviceLuxMap.entrySet()) {
-            String chipId = entry.getKey();
-            List<LuxRecordDO> luxList = entry.getValue();
-
-            Map<String, Double> pointMap = new HashMap<>();
-            for (LuxRecordDO lux : luxList) {
-                pointMap.put(
-                        formatLabel(lux),
-                        lux.getLuxValue() == null ? null : lux.getLuxValue().doubleValue()
-                );
-            }
-
-            MultiLuxRespVO.Dataset dataset = new MultiLuxRespVO.Dataset();
-            dataset.setLabel(chipId);
-
-            List<Double> data = new ArrayList<>();
-            for (String label : labels) {
-                data.add(pointMap.getOrDefault(label, null));
-            }
-
-            dataset.setData(data);
-            datasets.add(dataset);
+            datasets.add(buildDataset(entry.getKey(), entry.getValue(), labels));
         }
 
         respVO.setDatasets(datasets);
         return respVO;
     }
 
-    private Long getCurrentStoreId() {
-        Long userId = SecurityUtils.getCurrentUserId();
-
-        StoreDO store = storeMapper.selectOne(
-                new LambdaQueryWrapper<StoreDO>()
-                        .eq(StoreDO::getUserId, userId)
-        );
-
-        if (store == null) {
-            throw new ServiceException("当前用户未绑定店铺");
+    private MultiLuxRespVO.Dataset buildDataset(String chipId, List<LuxRecordDO> luxList, List<String> labels) {
+        Map<String, Double> pointMap = new HashMap<>();
+        for (LuxRecordDO lux : luxList) {
+            pointMap.put(
+                    formatLabel(lux),
+                    lux.getLuxValue() == null ? null : lux.getLuxValue().doubleValue()
+            );
         }
 
-        return store.getId();
+        MultiLuxRespVO.Dataset dataset = new MultiLuxRespVO.Dataset();
+        dataset.setLabel(chipId);
+
+        List<Double> data = new ArrayList<>();
+        for (String label : labels) {
+            data.add(pointMap.getOrDefault(label, null));
+        }
+        dataset.setData(data);
+        return dataset;
     }
 
     private String formatLabel(LuxRecordDO lux) {
         LocalDateTime time = lux.getCollectTime() != null ? lux.getCollectTime() : lux.getCreateTime();
-        if (time == null) {
-            return "-";
-        }
-        return time.format(TIME_FORMATTER);
+        return time == null ? "-" : time.format(TIME_FORMATTER);
     }
 }

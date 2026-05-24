@@ -21,7 +21,6 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -49,15 +48,18 @@ public class WeatherServiceImpl implements WeatherService {
     private final StoreMapper storeMapper;
     private final WeatherRecordMapper weatherRecordMapper;
     private final RestTemplate restTemplate;
+    private final RestTemplate backupRestTemplate;
     private final ObjectMapper objectMapper;
 
     public WeatherServiceImpl(StoreMapper storeMapper,
                               WeatherRecordMapper weatherRecordMapper,
                               @Qualifier("weatherRestTemplate") RestTemplate restTemplate,
+                              @Qualifier("weatherBackupRestTemplate") RestTemplate backupRestTemplate,
                               ObjectMapper objectMapper) {
         this.storeMapper = storeMapper;
         this.weatherRecordMapper = weatherRecordMapper;
         this.restTemplate = restTemplate;
+        this.backupRestTemplate = backupRestTemplate;
         this.objectMapper = objectMapper;
     }
 
@@ -249,11 +251,9 @@ public class WeatherServiceImpl implements WeatherService {
                 .build()
                 .toUriString();
 
-        // Use a separate RestTemplate with shorter timeout for backup
-        RestTemplate backupRt = createShortTimeoutTemplate();
         String raw;
         try {
-            raw = backupRt.getForObject(url, String.class);
+            raw = backupRestTemplate.getForObject(url, String.class);
         } catch (Exception e) {
             throw new ServiceException("OpenWeatherMap request failed: " + sanitizeReason(e.getMessage()));
         }
@@ -320,13 +320,6 @@ public class WeatherServiceImpl implements WeatherService {
         record.setCreateTime(LocalDateTime.now());
         weatherRecordMapper.insert(record);
         return record;
-    }
-
-    private RestTemplate createShortTimeoutTemplate() {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(5000);
-        factory.setReadTimeout(10000);
-        return new RestTemplate(factory);
     }
 
     private String sanitizeReason(String msg) {

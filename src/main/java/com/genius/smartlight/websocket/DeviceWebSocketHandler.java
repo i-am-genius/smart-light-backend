@@ -149,7 +149,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
         }
 
         if ("success".equals(newStatus)) {
-            otaProgressStore.setProgress(chipId, 100);
+            otaProgressStore.clearProgress(chipId);
         } else if ("idle".equals(newStatus)) {
             otaProgressStore.clearProgress(chipId);
         } else if ("failed".equals(newStatus)) {

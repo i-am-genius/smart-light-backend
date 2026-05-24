@@ -22,8 +22,6 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -148,22 +146,13 @@ public class DurationServiceImpl implements DurationService {
         }
 
         Long storeId = getCurrentStoreId();
-        List<DurationRecordDO> list = durationRecordMapper.selectList(
-                new LambdaQueryWrapper<DurationRecordDO>()
-                        .eq(DurationRecordDO::getChipId, chipId)
-                        .eq(DurationRecordDO::getStoreId, storeId)
-                        .between(DurationRecordDO::getStatDate, startDate, endDate)
-        );
-
-        long total = list.stream()
-                .mapToLong(DurationRecordDO::getDurationValue)
-                .sum();
+        Long total = durationRecordMapper.sumDurationByDateRange(storeId, chipId, startDate, endDate);
 
         DurationSumRespVO respVO = new DurationSumRespVO();
         respVO.setChipId(chipId);
         respVO.setStartDate(startDate);
         respVO.setEndDate(endDate);
-        respVO.setTotalDuration(total);
+        respVO.setTotalDuration(total == null ? 0 : total);
         return respVO;
     }
 
@@ -187,27 +176,7 @@ public class DurationServiceImpl implements DurationService {
             }
         }
 
-        List<DurationRecordDO> list = durationRecordMapper.selectList(
-                new LambdaQueryWrapper<DurationRecordDO>()
-                        .eq(DurationRecordDO::getStoreId, storeId)
-                        .eq(normalizedChipId != null, DurationRecordDO::getChipId, normalizedChipId)
-                        .between(DurationRecordDO::getStatDate, startDate, endDate)
-                        .orderByAsc(DurationRecordDO::getChipId)
-        );
-
-        Map<String, Long> summaryMap = list.stream()
-                .filter(item -> item.getChipId() != null && !item.getChipId().isBlank())
-                .collect(Collectors.groupingBy(
-                        DurationRecordDO::getChipId,
-                        Collectors.summingLong(item -> item.getDurationValue() == null ? 0 : item.getDurationValue())
-                ));
-
-        return summaryMap.entrySet().stream().map(entry -> {
-            DurationDeviceSummaryRespVO respVO = new DurationDeviceSummaryRespVO();
-            respVO.setChipId(entry.getKey());
-            respVO.setTotalDuration(entry.getValue());
-            return respVO;
-        }).toList();
+        return durationRecordMapper.selectDeviceSummaryByDateRange(storeId, startDate, endDate, normalizedChipId);
     }
 
     private String normalizeChipId(String chipId) {

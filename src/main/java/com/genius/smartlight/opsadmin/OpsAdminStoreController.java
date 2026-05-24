@@ -54,15 +54,13 @@ public class OpsAdminStoreController {
     @GetMapping("/export")
     public void export(@ModelAttribute OpsAdminStorePageReq req, HttpServletResponse response) {
         try {
-            byte[] csv = exportService.exportCsv(req);
             String filename = exportService.exportFilename();
             response.setContentType("text/csv;charset=UTF-8");
             response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
                     "attachment; filename=\"" + filename + "\"");
-            response.setContentLength(csv.length);
-            response.getOutputStream().write(csv);
+            int rows = exportService.writeCsv(req, response.getOutputStream());
             response.getOutputStream().flush();
-            log.info("[ops-admin] Store export downloaded: {} ({} bytes)", filename, csv.length);
+            log.info("[ops-admin] Store export downloaded: {} ({} rows)", filename, rows);
         } catch (Exception e) {
             log.error("[ops-admin] Failed to export stores CSV", e);
             try {

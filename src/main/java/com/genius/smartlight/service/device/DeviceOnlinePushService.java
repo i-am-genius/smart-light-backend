@@ -9,7 +9,10 @@ import com.genius.smartlight.websocket.WebSocketPushService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
@@ -50,9 +53,53 @@ public class DeviceOnlinePushService {
     }
 
     public void scanAndPushOfflineChanges() {
-        for (String chipId : deviceSessionManager.getTrackedChipIds()) {
+        Set<String> trackedChipIds = deviceSessionManager.getTrackedChipIds();
+        for (String chipId : trackedChipIds) {
             pushIfChanged(chipId);
         }
+        cleanupStaleStatusKeys(trackedChipIds);
+    }
+
+    private void cleanupStaleStatusKeys(Set<String> trackedChipIds) {
+        if (lastPushedStatusMap.isEmpty()) {
+            return;
+        }
+
+        Set<String> tracked = normalizeChipIds(trackedChipIds);
+        Set<String> existingDevices = loadExistingDeviceChipIds();
+
+        lastPushedStatusMap.keySet().removeIf(chipId -> {
+            String normalizedChipId = deviceSessionManager.normalizeChipId(chipId);
+            return normalizedChipId == null
+                    || (!existingDevices.contains(normalizedChipId) && !tracked.contains(normalizedChipId));
+        });
+    }
+
+    private Set<String> loadExistingDeviceChipIds() {
+        List<DeviceDO> devices = deviceMapper.selectList(
+                new LambdaQueryWrapper<DeviceDO>()
+                        .select(DeviceDO::getChipId)
+                        .isNotNull(DeviceDO::getChipId)
+        );
+        Set<String> chipIds = new HashSet<>();
+        for (DeviceDO device : devices) {
+            String chipId = deviceSessionManager.normalizeChipId(device.getChipId());
+            if (chipId != null) {
+                chipIds.add(chipId);
+            }
+        }
+        return chipIds;
+    }
+
+    private Set<String> normalizeChipIds(Set<String> chipIds) {
+        Set<String> normalized = new HashSet<>();
+        for (String chipId : chipIds) {
+            String value = deviceSessionManager.normalizeChipId(chipId);
+            if (value != null) {
+                normalized.add(value);
+            }
+        }
+        return normalized;
     }
 
     private DeviceOnlineStatusRespVO buildOnlineStatus(String chipId, DeviceDO device) {

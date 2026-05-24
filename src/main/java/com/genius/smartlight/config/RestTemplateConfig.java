@@ -12,6 +12,7 @@ import java.time.Duration;
 public class RestTemplateConfig {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
+    private static final Duration WEATHER_BACKUP_CONNECT_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration WEATHER_READ_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration AI_READ_TIMEOUT = Duration.ofSeconds(20);
 
@@ -26,6 +27,11 @@ public class RestTemplateConfig {
         return createRestTemplate(WEATHER_READ_TIMEOUT);
     }
 
+    @Bean("weatherBackupRestTemplate")
+    public RestTemplate weatherBackupRestTemplate() {
+        return createRestTemplate(WEATHER_BACKUP_CONNECT_TIMEOUT, WEATHER_READ_TIMEOUT);
+    }
+
     @Bean("aiRestTemplate")
     public RestTemplate aiRestTemplate() {
         return createRestTemplate(AI_READ_TIMEOUT);
@@ -37,8 +43,12 @@ public class RestTemplateConfig {
     }
 
     private RestTemplate createRestTemplate(Duration readTimeout) {
+        return createRestTemplate(CONNECT_TIMEOUT, readTimeout);
+    }
+
+    private RestTemplate createRestTemplate(Duration connectTimeout, Duration readTimeout) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(CONNECT_TIMEOUT);
+        factory.setConnectTimeout(connectTimeout);
         factory.setReadTimeout(readTimeout);
         return new RestTemplate(factory);
     }

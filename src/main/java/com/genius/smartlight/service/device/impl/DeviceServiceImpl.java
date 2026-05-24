@@ -246,13 +246,7 @@ public class DeviceServiceImpl implements DeviceService {
 
     @Override
     public List<DeviceRespVO> getDeviceList() {
-        StoreDO store = getCurrentStore();
-        List<DeviceDO> list = deviceMapper.selectList(
-                new LambdaQueryWrapper<DeviceDO>()
-                        .eq(DeviceDO::getStoreId, store.getId())
-                        .orderByDesc(DeviceDO::getId)
-        );
-        return list.stream().map(this::toResp).toList();
+        return listCurrentStoreDevices();
     }
 
     @Override
@@ -263,6 +257,10 @@ public class DeviceServiceImpl implements DeviceService {
 
     @Override
     public List<DeviceRespVO> getCurrentUserDeviceList() {
+        return listCurrentStoreDevices();
+    }
+
+    private List<DeviceRespVO> listCurrentStoreDevices() {
         StoreDO store = getCurrentStore();
         List<DeviceDO> list = deviceMapper.selectList(
                 new LambdaQueryWrapper<DeviceDO>()

@@ -114,7 +114,7 @@ public class DeviceReportServiceImpl implements DeviceReportService {
         }
 
         if ("success".equals(newStatus)) {
-            otaProgressStore.setProgress(chipId, 100);
+            otaProgressStore.clearProgress(chipId);
             if (!"success".equals(oldStatus)) {
                 log.info("OTA success, chipId={}, progress=100", chipId);
             }

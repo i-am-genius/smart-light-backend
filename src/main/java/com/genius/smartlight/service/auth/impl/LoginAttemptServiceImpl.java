@@ -3,6 +3,7 @@ package com.genius.smartlight.service.auth.impl;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.service.auth.LoginAttemptService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -31,9 +32,7 @@ public class LoginAttemptServiceImpl implements LoginAttemptService {
         Deque<Long> attempts = ipAttempts.computeIfAbsent(key, ignored -> new ArrayDeque<>());
 
         synchronized (attempts) {
-            while (!attempts.isEmpty() && now - attempts.peekFirst() > IP_WINDOW_MS) {
-                attempts.removeFirst();
-            }
+            pruneAttempts(attempts, now, IP_WINDOW_MS);
             if (attempts.size() >= MAX_IP_ATTEMPTS_PER_MINUTE) {
                 log.warn("Login request rate limited by IP, ip={}", key);
                 throw new ServiceException("请求过于频繁，请稍后再试");
@@ -80,6 +79,7 @@ public class LoginAttemptServiceImpl implements LoginAttemptService {
                 return;
             }
             state.failureCount++;
+            state.lastUpdatedMs = now;
             if (state.failureCount >= MAX_USERNAME_FAILURES) {
                 state.lockedUntilMs = now + USER_LOCK_MS;
                 log.warn("Login username locked after repeated failures, username={}, failureCount={}", key, state.failureCount);
@@ -113,8 +113,37 @@ public class LoginAttemptServiceImpl implements LoginAttemptService {
         return ip.trim();
     }
 
+    @Scheduled(fixedDelay = 600_000)
+    public void cleanupExpiredEntries() {
+        long now = System.currentTimeMillis();
+        ipAttempts.entrySet().removeIf(entry -> {
+            Deque<Long> attempts = entry.getValue();
+            synchronized (attempts) {
+                pruneAttempts(attempts, now, IP_WINDOW_MS);
+                return attempts.isEmpty();
+            }
+        });
+        usernameFailures.entrySet().removeIf(entry -> shouldRemoveFailureState(entry.getValue(), now));
+    }
+
+    private void pruneAttempts(Deque<Long> attempts, long now, long windowMs) {
+        while (!attempts.isEmpty() && now - attempts.peekFirst() > windowMs) {
+            attempts.removeFirst();
+        }
+    }
+
+    private boolean shouldRemoveFailureState(FailureState state, long now) {
+        synchronized (state) {
+            if (state.lockedUntilMs > 0) {
+                return state.lockedUntilMs <= now;
+            }
+            return state.lastUpdatedMs > 0 && now - state.lastUpdatedMs > USER_LOCK_MS;
+        }
+    }
+
     private static class FailureState {
         private int failureCount;
         private long lockedUntilMs;
+        private long lastUpdatedMs;
     }
 }

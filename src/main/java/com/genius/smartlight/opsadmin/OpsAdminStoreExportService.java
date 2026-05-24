@@ -4,9 +4,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -21,15 +20,13 @@ public class OpsAdminStoreExportService {
 
     private final OpsAdminStoreService storeService;
 
-    public byte[] exportCsv(OpsAdminStorePageReq req) {
+    public int writeCsv(OpsAdminStorePageReq req, OutputStream outputStream) {
         List<OpsAdminStoreResp> rows = storeService.export(req);
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (OutputStreamWriter w = new OutputStreamWriter(bos, StandardCharsets.UTF_8)) {
-            // UTF-8 BOM
-            w.write('﻿');
+        try {
+            outputStream.write(UTF8_BOM);
+            OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8);
 
-            // Header
-            w.write(csvLine(
+            writer.write(csvLine(
                     "店铺ID", "所属用户ID", "店铺名称", "店铺风格", "面积",
                     "省份", "城市", "纬度", "经度", "创建时间", "更新时间",
                     "设备总数", "普通灯数量", "摄像头灯数量", "自动模式设备数", "手动模式设备数",
@@ -45,44 +42,43 @@ public class OpsAdminStoreExportService {
                     "是否有摄像头灯", "是否有自动模式设备", "光照状态", "策略建议"
             ));
 
-            // Data rows
-            for (OpsAdminStoreResp r : rows) {
-                w.write(csvLine(
-                        str(r.getId()), str(r.getUserId()), str(r.getStoreName()), str(r.getStoreStyle()), str(r.getArea()),
-                        str(r.getProvince()), str(r.getCity()), str(r.getLatitude()), str(r.getLongitude()),
-                        str(r.getCreateTime()), str(r.getUpdateTime()),
-                        str(r.getDeviceCount()), str(r.getLampCount()), str(r.getCamlampCount()),
-                        str(r.getAutoModeDeviceCount()), str(r.getManualModeDeviceCount()),
-                        str(r.getStableFirmwareCount()), str(r.getTestFirmwareCount()),
-                        str(r.getOtaUpdatingCount()), str(r.getOtaFailedCount()),
-                        str(r.getAvgBrightness()), str(r.getAvgTemp()),
-                        str(r.getAvgRecommendedBrightness()), str(r.getAvgRecommendedTemp()),
-                        str(r.getAutoModeRatio()), str(r.getBrightnessDeviationAvg()), str(r.getTempDeviationAvg()),
-                        str(r.getLatestLux()), str(r.getLatestLuxTime()),
-                        str(r.getAvgLuxToday()), str(r.getMaxLuxToday()), str(r.getMinLuxToday()),
-                        str(r.getLuxRecordCountToday()),
-                        str(r.getDurationToday()), toMinutes(r.getDurationToday()),
-                        str(r.getDurationTotal()), toMinutes(r.getDurationTotal()),
-                        str(r.getAvgDurationToday()), str(r.getDurationRecordCountToday()),
-                        str(r.getDurationPerAreaToday()),
-                        str(r.getLatestWeatherText()), str(r.getLatestWeatherCode()),
-                        str(r.getLatestOutdoorTemp()), str(r.getLatestApparentTemp()),
-                        str(r.getLatestHumidity()), str(r.getLatestWindSpeed()),
-                        str(r.getLatestTempMax()), str(r.getLatestTempMin()), str(r.getLatestWeatherTime()),
-                        str(r.getDeviceDensity()), str(r.getLampDensity()), str(r.getCamlampDensity()),
-                        str(r.getLuxPerArea()),
-                        r.isHasCamlamp() ? "是" : "否",
-                        r.isHasAutoModeDevices() ? "是" : "否",
-                        str(r.getLightLevelStatus()), str(r.getEnergyStrategyHint())
+            for (OpsAdminStoreResp row : rows) {
+                writer.write(csvLine(
+                        str(row.getId()), str(row.getUserId()), str(row.getStoreName()), str(row.getStoreStyle()), str(row.getArea()),
+                        str(row.getProvince()), str(row.getCity()), str(row.getLatitude()), str(row.getLongitude()),
+                        str(row.getCreateTime()), str(row.getUpdateTime()),
+                        str(row.getDeviceCount()), str(row.getLampCount()), str(row.getCamlampCount()),
+                        str(row.getAutoModeDeviceCount()), str(row.getManualModeDeviceCount()),
+                        str(row.getStableFirmwareCount()), str(row.getTestFirmwareCount()),
+                        str(row.getOtaUpdatingCount()), str(row.getOtaFailedCount()),
+                        str(row.getAvgBrightness()), str(row.getAvgTemp()),
+                        str(row.getAvgRecommendedBrightness()), str(row.getAvgRecommendedTemp()),
+                        str(row.getAutoModeRatio()), str(row.getBrightnessDeviationAvg()), str(row.getTempDeviationAvg()),
+                        str(row.getLatestLux()), str(row.getLatestLuxTime()),
+                        str(row.getAvgLuxToday()), str(row.getMaxLuxToday()), str(row.getMinLuxToday()),
+                        str(row.getLuxRecordCountToday()),
+                        str(row.getDurationToday()), toMinutes(row.getDurationToday()),
+                        str(row.getDurationTotal()), toMinutes(row.getDurationTotal()),
+                        str(row.getAvgDurationToday()), str(row.getDurationRecordCountToday()),
+                        str(row.getDurationPerAreaToday()),
+                        str(row.getLatestWeatherText()), str(row.getLatestWeatherCode()),
+                        str(row.getLatestOutdoorTemp()), str(row.getLatestApparentTemp()),
+                        str(row.getLatestHumidity()), str(row.getLatestWindSpeed()),
+                        str(row.getLatestTempMax()), str(row.getLatestTempMin()), str(row.getLatestWeatherTime()),
+                        str(row.getDeviceDensity()), str(row.getLampDensity()), str(row.getCamlampDensity()),
+                        str(row.getLuxPerArea()),
+                        row.isHasCamlamp() ? "是" : "否",
+                        row.isHasAutoModeDevices() ? "是" : "否",
+                        str(row.getLightLevelStatus()), str(row.getEnergyStrategyHint())
                 ));
             }
-            w.flush();
+            writer.flush();
         } catch (Exception e) {
             log.error("[ops-admin] Failed to generate store export CSV", e);
-            throw new RuntimeException("导出CSV失败: " + e.getMessage());
+            throw new RuntimeException("Export CSV failed: " + e.getMessage(), e);
         }
-        log.info("[ops-admin] Store export generated: {} rows, {} bytes", rows.size(), bos.size());
-        return bos.toByteArray();
+        log.info("[ops-admin] Store export generated: {} rows", rows.size());
+        return rows.size();
     }
 
     public String exportFilename() {
@@ -94,22 +90,21 @@ public class OpsAdminStoreExportService {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < cols.length; i++) {
             if (i > 0) sb.append(',');
-            String val = cols[i] != null ? cols[i].toString() : "";
-            if (val.contains(",") || val.contains("\"") || val.contains("\n")) {
-                val = "\"" + val.replace("\"", "\"\"") + "\"";
+            String value = cols[i] != null ? cols[i].toString() : "";
+            if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
+                value = "\"" + value.replace("\"", "\"\"") + "\"";
             }
-            sb.append(val);
+            sb.append(value);
         }
         sb.append('\n');
         return sb.toString();
     }
 
-    private String str(Object o) {
-        return o != null ? o.toString() : "";
+    private String str(Object value) {
+        return value != null ? value.toString() : "";
     }
 
-    private String toMinutes(Long ms) {
-        if (ms == null) return "";
-        return String.valueOf(ms / 60000);
+    private String toMinutes(Long millis) {
+        return millis == null ? "" : String.valueOf(millis / 60000);
     }
 }

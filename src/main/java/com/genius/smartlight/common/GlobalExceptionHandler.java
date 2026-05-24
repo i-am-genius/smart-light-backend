@@ -1,12 +1,12 @@
 package com.genius.smartlight.common;
 
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
-import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @RestControllerAdvice
@@ -35,7 +35,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(NoResourceFoundException.class)
     public CommonResult<String> handleNoResource(HttpServletRequest request, NoResourceFoundException ex) {
         String uri = request.getRequestURI();
-        if ("/".equals(uri) || uri.startsWith("/favicon") || uri.startsWith("/robots.txt")) {
+        if (isHarmlessStaticRequest(uri)) {
             log.info("Harmless static request, {}", RequestLogUtils.logContext(request));
         } else {
             log.warn("No resource found, {}", RequestLogUtils.logContext(request));
@@ -46,11 +46,41 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(Exception.class)
     public CommonResult<String> handleException(HttpServletRequest request, Exception ex) {
         String uri = request.getRequestURI();
-        if ("/".equals(uri) || uri.startsWith("/favicon") || uri.startsWith("/robots.txt")) {
+        if (isHarmlessStaticRequest(uri)) {
             log.info("Harmless request, {}", RequestLogUtils.logContext(request));
             return CommonResult.error(404, "资源不存在");
         }
+        if (isClientAbort(ex)) {
+            log.warn("Client connection aborted while writing response, {}", RequestLogUtils.logContext(request));
+            log.debug("Client abort detail", ex);
+            return null;
+        }
         log.error("Unhandled server exception, {}", RequestLogUtils.logContext(request), ex);
         return CommonResult.error(500, "服务器内部错误，请稍后重试");
+    }
+
+    private boolean isHarmlessStaticRequest(String uri) {
+        return "/".equals(uri) || uri.startsWith("/favicon") || uri.startsWith("/robots.txt");
+    }
+
+    private boolean isClientAbort(Throwable ex) {
+        Throwable current = ex;
+        while (current != null) {
+            String className = current.getClass().getName();
+            String message = current.getMessage();
+            if (className.contains("ClientAbortException")
+                    || className.contains("AsyncRequestNotUsableException")) {
+                return true;
+            }
+            if (message != null
+                    && (message.contains("Broken pipe")
+                    || message.contains("Connection reset by peer")
+                    || message.contains("An established connection was aborted")
+                    || message.contains("Response not usable after response errors"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }

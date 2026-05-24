@@ -40,11 +40,12 @@ public class OpsAdminStoreService {
 
         LambdaQueryWrapper<StoreDO> qw = buildStoreWrapper(req);
         List<StoreDO> stores = storeMapper.selectList(qw);
+        StoreEnrichmentContext context = buildContext(stores);
 
         // Apply advanced filters that require device join
         if (isNotBlank(req.getHasDevices()) || isNotBlank(req.getHasCamlamp())
                 || isNotBlank(req.getAutoMode()) || isNotBlank(req.getFirmwareChannel())) {
-            stores = filterByDeviceConditions(stores, req);
+            stores = filterByDeviceConditions(stores, req, context);
         }
 
         // Sort
@@ -55,7 +56,7 @@ public class OpsAdminStoreService {
         // Enrich each store
         List<OpsAdminStoreResp> enriched = new ArrayList<>();
         for (StoreDO s : stores) {
-            enriched.add(enrich(s));
+            enriched.add(enrich(s, context));
         }
 
         // Sort enriched results
@@ -75,7 +76,8 @@ public class OpsAdminStoreService {
         List<StoreDO> stores = storeMapper.selectList(qw);
         if (isNotBlank(req.getHasDevices()) || isNotBlank(req.getHasCamlamp())
                 || isNotBlank(req.getAutoMode()) || isNotBlank(req.getFirmwareChannel())) {
-            stores = filterByDeviceConditions(stores, req);
+            StoreEnrichmentContext context = buildContext(stores);
+            stores = filterByDeviceConditions(stores, req, context);
         }
         return stores.size();
     }
@@ -83,23 +85,24 @@ public class OpsAdminStoreService {
     public OpsAdminStoreDetailResp detail(Long storeId) {
         StoreDO s = storeMapper.selectById(storeId);
         if (s == null) return null;
-        OpsAdminStoreResp row = enrich(s);
+        OpsAdminStoreResp row = enrich(s, buildContext(List.of(s)));
         return OpsAdminStoreDetailResp.from(row);
     }
 
     public List<OpsAdminStoreResp> export(OpsAdminStorePageReq req) {
         LambdaQueryWrapper<StoreDO> qw = buildStoreWrapper(req);
         List<StoreDO> stores = storeMapper.selectList(qw);
+        StoreEnrichmentContext context = buildContext(stores);
         if (isNotBlank(req.getHasDevices()) || isNotBlank(req.getHasCamlamp())
                 || isNotBlank(req.getAutoMode()) || isNotBlank(req.getFirmwareChannel())) {
-            stores = filterByDeviceConditions(stores, req);
+            stores = filterByDeviceConditions(stores, req, context);
         }
         if (stores.size() > EXPORT_MAX) {
             stores = stores.subList(0, EXPORT_MAX);
         }
         List<OpsAdminStoreResp> result = new ArrayList<>();
         for (StoreDO s : stores) {
-            result.add(enrich(s));
+            result.add(enrich(s, context));
         }
         String sortBy = SORT_WHITELIST.contains(req.getSortBy()) ? req.getSortBy() : "createTime";
         String sortOrder = "asc".equalsIgnoreCase(req.getSortOrder()) ? "asc" : "desc";
@@ -126,11 +129,56 @@ public class OpsAdminStoreService {
         return qw;
     }
 
-    private List<StoreDO> filterByDeviceConditions(List<StoreDO> stores, OpsAdminStorePageReq req) {
+    private StoreEnrichmentContext buildContext(List<StoreDO> stores) {
+        if (stores == null || stores.isEmpty()) {
+            return StoreEnrichmentContext.empty();
+        }
+
+        List<Long> storeIds = stores.stream()
+                .map(StoreDO::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (storeIds.isEmpty()) {
+            return StoreEnrichmentContext.empty();
+        }
+
+        Map<Long, List<DeviceDO>> devicesByStore = deviceMapper.selectList(
+                        new LambdaQueryWrapper<DeviceDO>().in(DeviceDO::getStoreId, storeIds))
+                .stream()
+                .filter(device -> device.getStoreId() != null)
+                .collect(Collectors.groupingBy(DeviceDO::getStoreId));
+
+        LocalDate today = LocalDate.now();
+        LocalDateTime todayStart = today.atStartOfDay();
+        LocalDateTime tomorrowStart = today.plusDays(1).atStartOfDay();
+
+        Map<Long, OpsAdminLuxStats> luxStatsByStore = luxRecordMapper
+                .selectOpsAdminLuxStats(storeIds, todayStart, tomorrowStart)
+                .stream()
+                .filter(stats -> stats.getStoreId() != null)
+                .collect(Collectors.toMap(OpsAdminLuxStats::getStoreId, stats -> stats, (a, b) -> a));
+
+        Map<Long, OpsAdminDurationStats> durationStatsByStore = durationRecordMapper
+                .selectOpsAdminDurationStats(storeIds, today)
+                .stream()
+                .filter(stats -> stats.getStoreId() != null)
+                .collect(Collectors.toMap(OpsAdminDurationStats::getStoreId, stats -> stats, (a, b) -> a));
+
+        Map<Long, WeatherRecordDO> latestWeatherByStore = weatherRecordMapper
+                .selectLatestByStoreIds(storeIds)
+                .stream()
+                .filter(record -> record.getStoreId() != null)
+                .collect(Collectors.toMap(WeatherRecordDO::getStoreId, record -> record, (a, b) -> a));
+
+        return new StoreEnrichmentContext(devicesByStore, luxStatsByStore, durationStatsByStore, latestWeatherByStore);
+    }
+
+    private List<StoreDO> filterByDeviceConditions(List<StoreDO> stores, OpsAdminStorePageReq req,
+                                                   StoreEnrichmentContext context) {
         List<StoreDO> result = new ArrayList<>();
         for (StoreDO s : stores) {
-            List<DeviceDO> devs = deviceMapper.selectList(
-                    new LambdaQueryWrapper<DeviceDO>().eq(DeviceDO::getStoreId, s.getId()));
+            List<DeviceDO> devs = context.devicesByStore.getOrDefault(s.getId(), List.of());
             if (isNotBlank(req.getHasDevices())) {
                 if ("yes".equals(req.getHasDevices()) && devs.isEmpty()) continue;
                 if ("no".equals(req.getHasDevices()) && !devs.isEmpty()) continue;
@@ -154,7 +202,7 @@ public class OpsAdminStoreService {
         return result;
     }
 
-    private OpsAdminStoreResp enrich(StoreDO s) {
+    private OpsAdminStoreResp enrich(StoreDO s, StoreEnrichmentContext context) {
         OpsAdminStoreResp r = new OpsAdminStoreResp();
         // Base
         r.setId(String.valueOf(s.getId()));
@@ -170,8 +218,7 @@ public class OpsAdminStoreService {
         r.setUpdateTime(fmt(s.getUpdateTime()));
 
         // Device stats
-        List<DeviceDO> devs = deviceMapper.selectList(
-                new LambdaQueryWrapper<DeviceDO>().eq(DeviceDO::getStoreId, s.getId()));
+        List<DeviceDO> devs = context.devicesByStore.getOrDefault(s.getId(), List.of());
         r.setDeviceCount(devs.size());
         r.setLampCount((int) devs.stream().filter(d -> !"camlamp".equalsIgnoreCase(d.getDeviceType())).count());
         r.setCamlampCount((int) devs.stream().filter(d -> "camlamp".equalsIgnoreCase(d.getDeviceType())).count());
@@ -199,13 +246,13 @@ public class OpsAdminStoreService {
         if (avgT != null && avgRT != null) r.setTempDeviationAvg(avgT.subtract(avgRT));
 
         // Lux
-        enrichLux(s.getId(), r);
+        enrichLux(s.getId(), r, context);
 
         // Duration
-        enrichDuration(s.getId(), r);
+        enrichDuration(s.getId(), r, context);
 
         // Weather
-        enrichWeather(s.getId(), r);
+        enrichWeather(s.getId(), r, context);
 
         // Strategy
         enrichStrategy(r);
@@ -213,73 +260,38 @@ public class OpsAdminStoreService {
         return r;
     }
 
-    private void enrichLux(Long storeId, OpsAdminStoreResp r) {
+    private void enrichLux(Long storeId, OpsAdminStoreResp r, StoreEnrichmentContext context) {
         try {
-            List<LuxRecordDO> all = luxRecordMapper.selectList(
-                    new LambdaQueryWrapper<LuxRecordDO>().eq(LuxRecordDO::getStoreId, storeId)
-                            .orderByDesc(LuxRecordDO::getCollectTime));
-            if (all.isEmpty()) return;
-            LuxRecordDO latest = all.get(0);
-            r.setLatestLux(latest.getLuxValue());
-            r.setLatestLuxTime(fmt(latest.getCollectTime()));
-
-            LocalDate today = LocalDate.now();
-            List<LuxRecordDO> todayList = all.stream()
-                    .filter(x -> x.getCollectTime() != null && x.getCollectTime().toLocalDate().equals(today))
-                    .collect(Collectors.toList());
-            r.setLuxRecordCountToday(todayList.size());
-            if (!todayList.isEmpty()) {
-                BigDecimal sum = BigDecimal.ZERO;
-                BigDecimal max = BigDecimal.ZERO;
-                BigDecimal min = new BigDecimal("999999");
-                for (LuxRecordDO rec : todayList) {
-                    BigDecimal v = rec.getLuxValue() != null ? rec.getLuxValue() : BigDecimal.ZERO;
-                    sum = sum.add(v);
-                    if (v.compareTo(max) > 0) max = v;
-                    if (v.compareTo(min) < 0) min = v;
-                }
-                r.setAvgLuxToday(sum.divide(BigDecimal.valueOf(todayList.size()), 2, RoundingMode.HALF_UP));
-                r.setMaxLuxToday(max);
-                r.setMinLuxToday(min.compareTo(new BigDecimal("999999")) < 0 ? min : null);
-            }
+            OpsAdminLuxStats stats = context.luxStatsByStore.get(storeId);
+            if (stats == null) return;
+            r.setLatestLux(stats.getLatestLux());
+            r.setLatestLuxTime(fmt(stats.getLatestLuxTime()));
+            r.setLuxRecordCountToday(stats.getLuxRecordCountToday() == null ? 0 : stats.getLuxRecordCountToday());
+            r.setAvgLuxToday(scale(stats.getAvgLuxToday(), 2));
+            r.setMaxLuxToday(stats.getMaxLuxToday());
+            r.setMinLuxToday(stats.getMinLuxToday());
         } catch (Exception e) {
             log.warn("[ops-admin] Failed to collect lux for store {}: {}", storeId, e.getMessage());
         }
     }
 
-    private void enrichDuration(Long storeId, OpsAdminStoreResp r) {
+    private void enrichDuration(Long storeId, OpsAdminStoreResp r, StoreEnrichmentContext context) {
         try {
-            List<DurationRecordDO> all = durationRecordMapper.selectList(
-                    new LambdaQueryWrapper<DurationRecordDO>().eq(DurationRecordDO::getStoreId, storeId));
-            if (all.isEmpty()) return;
-            LocalDate today = LocalDate.now();
-            long todayTotal = 0;
-            long todayCount = 0;
-            long grandTotal = 0;
-            for (DurationRecordDO rec : all) {
-                long v = rec.getDurationValue() != null ? rec.getDurationValue() : 0;
-                grandTotal += v;
-                if (rec.getStatDate() != null && rec.getStatDate().equals(today)) {
-                    todayTotal += v;
-                    todayCount++;
-                }
-            }
-            r.setDurationToday(todayTotal);
-            r.setDurationTotal(grandTotal);
-            r.setAvgDurationToday(todayCount > 0 ? todayTotal / todayCount : null);
-            r.setDurationRecordCountToday((int) todayCount);
+            OpsAdminDurationStats stats = context.durationStatsByStore.get(storeId);
+            if (stats == null) return;
+            r.setDurationToday(stats.getDurationToday());
+            r.setDurationTotal(stats.getDurationTotal());
+            r.setAvgDurationToday(stats.getAvgDurationToday());
+            r.setDurationRecordCountToday(stats.getDurationRecordCountToday() == null ? 0 : stats.getDurationRecordCountToday());
         } catch (Exception e) {
             log.warn("[ops-admin] Failed to collect duration for store {}: {}", storeId, e.getMessage());
         }
     }
 
-    private void enrichWeather(Long storeId, OpsAdminStoreResp r) {
+    private void enrichWeather(Long storeId, OpsAdminStoreResp r, StoreEnrichmentContext context) {
         try {
-            List<WeatherRecordDO> all = weatherRecordMapper.selectList(
-                    new LambdaQueryWrapper<WeatherRecordDO>().eq(WeatherRecordDO::getStoreId, storeId)
-                            .orderByDesc(WeatherRecordDO::getCollectTime));
-            if (all.isEmpty()) return;
-            WeatherRecordDO w = all.get(0);
+            WeatherRecordDO w = context.latestWeatherByStore.get(storeId);
+            if (w == null) return;
             r.setLatestWeatherText(w.getWeatherText());
             r.setLatestWeatherCode(w.getWeatherCode());
             r.setLatestOutdoorTemp(w.getTemperature());
@@ -359,12 +371,27 @@ public class OpsAdminStoreService {
         try { return Long.parseLong(s); } catch (NumberFormatException e) { return 0L; }
     }
 
+    private BigDecimal scale(BigDecimal value, int scale) {
+        return value == null ? null : value.setScale(scale, RoundingMode.HALF_UP);
+    }
+
     private BigDecimal avgInt(List<DeviceDO> devs, java.util.function.Function<DeviceDO, Integer> getter) {
         List<Integer> vals = devs.stream().map(getter).filter(Objects::nonNull).toList();
         if (vals.isEmpty()) return null;
         long sum = 0;
         for (Integer v : vals) sum += v;
         return BigDecimal.valueOf(sum).divide(BigDecimal.valueOf(vals.size()), 2, RoundingMode.HALF_UP);
+    }
+
+    private record StoreEnrichmentContext(
+            Map<Long, List<DeviceDO>> devicesByStore,
+            Map<Long, OpsAdminLuxStats> luxStatsByStore,
+            Map<Long, OpsAdminDurationStats> durationStatsByStore,
+            Map<Long, WeatherRecordDO> latestWeatherByStore
+    ) {
+        private static StoreEnrichmentContext empty() {
+            return new StoreEnrichmentContext(Map.of(), Map.of(), Map.of(), Map.of());
+        }
     }
 
     // --- Time-series export ---
@@ -384,20 +411,15 @@ public class OpsAdminStoreService {
         if (start == null) start = LocalDateTime.now().minusDays(7);
         if (end == null) end = LocalDateTime.now();
 
-        // Preload store names
-        Map<Long, String> storeNames = new LinkedHashMap<>();
-        for (Long sid : sids) {
-            StoreDO s = storeMapper.selectById(sid);
-            storeNames.put(sid, s != null ? s.getStoreName() : String.valueOf(sid));
-        }
+        Map<Long, StoreDO> storeMap = storeMapper.selectList(
+                        new LambdaQueryWrapper<StoreDO>().in(StoreDO::getId, sids))
+                .stream()
+                .collect(Collectors.toMap(StoreDO::getId, store -> store, (a, b) -> a, LinkedHashMap::new));
 
         // Preload device info
         Map<Long, DeviceDO> deviceMap = new LinkedHashMap<>();
-        for (Long sid : sids) {
-            List<DeviceDO> devs = deviceMapper.selectList(
-                    new LambdaQueryWrapper<DeviceDO>().eq(DeviceDO::getStoreId, sid));
-            for (DeviceDO d : devs) deviceMap.put(d.getId(), d);
-        }
+        deviceMapper.selectList(new LambdaQueryWrapper<DeviceDO>().in(DeviceDO::getStoreId, sids))
+                .forEach(device -> deviceMap.put(device.getId(), device));
 
         List<String> types = req.getDataTypes() != null ? req.getDataTypes() : List.of("lux", "duration", "weather");
 
@@ -412,11 +434,7 @@ public class OpsAdminStoreService {
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("dataType", "lux");
                 row.put("recordTime", fmt(rec.getCollectTime()));
-                StoreDO st = storeMapper.selectById(rec.getStoreId());
-                row.put("storeId", String.valueOf(rec.getStoreId()));
-                row.put("storeName", st != null ? st.getStoreName() : String.valueOf(rec.getStoreId()));
-                row.put("province", st != null ? st.getProvince() : "");
-                row.put("city", st != null ? st.getCity() : "");
+                appendStoreFields(row, rec.getStoreId(), storeMap);
                 row.put("deviceId", rec.getDeviceId() != null ? String.valueOf(rec.getDeviceId()) : "");
                 row.put("chipId", rec.getChipId() != null ? rec.getChipId() : "");
                 DeviceDO dev = rec.getDeviceId() != null ? deviceMap.get(rec.getDeviceId()) : null;
@@ -438,11 +456,7 @@ public class OpsAdminStoreService {
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("dataType", "duration");
                 row.put("recordTime", fmt(rec.getCollectTime()));
-                StoreDO st = storeMapper.selectById(rec.getStoreId());
-                row.put("storeId", String.valueOf(rec.getStoreId()));
-                row.put("storeName", st != null ? st.getStoreName() : String.valueOf(rec.getStoreId()));
-                row.put("province", st != null ? st.getProvince() : "");
-                row.put("city", st != null ? st.getCity() : "");
+                appendStoreFields(row, rec.getStoreId(), storeMap);
                 row.put("deviceId", rec.getDeviceId() != null ? String.valueOf(rec.getDeviceId()) : "");
                 row.put("chipId", rec.getChipId() != null ? rec.getChipId() : "");
                 DeviceDO dev = rec.getDeviceId() != null ? deviceMap.get(rec.getDeviceId()) : null;
@@ -464,11 +478,7 @@ public class OpsAdminStoreService {
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("dataType", "weather");
                 row.put("recordTime", fmt(rec.getCollectTime()));
-                StoreDO st = storeMapper.selectById(rec.getStoreId());
-                row.put("storeId", String.valueOf(rec.getStoreId()));
-                row.put("storeName", st != null ? st.getStoreName() : String.valueOf(rec.getStoreId()));
-                row.put("province", st != null ? st.getProvince() : "");
-                row.put("city", st != null ? st.getCity() : "");
+                appendStoreFields(row, rec.getStoreId(), storeMap);
                 row.put("weatherText", rec.getWeatherText());
                 row.put("weatherCode", rec.getWeatherCode());
                 row.put("temperature", rec.getTemperature());
@@ -488,6 +498,14 @@ public class OpsAdminStoreService {
         if (s == null || s.isBlank()) return null;
         try { return LocalDateTime.parse(s.replace("T", " ").substring(0, 19).trim(), DT_FMT); }
         catch (Exception e) { return null; }
+    }
+
+    private void appendStoreFields(Map<String, Object> row, Long storeId, Map<Long, StoreDO> storeMap) {
+        StoreDO store = storeId == null ? null : storeMap.get(storeId);
+        row.put("storeId", storeId != null ? String.valueOf(storeId) : "");
+        row.put("storeName", store != null ? store.getStoreName() : String.valueOf(storeId));
+        row.put("province", store != null ? store.getProvince() : "");
+        row.put("city", store != null ? store.getCity() : "");
     }
 
     private String luxToStatus(BigDecimal lux) {

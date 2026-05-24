@@ -156,13 +156,24 @@ public class DeviceSessionManager {
         if (deviceSessionMap.containsKey(normalizedChipId) || lastSeenMap.containsKey(normalizedChipId)) {
             return normalizedChipId;
         }
-        for (String trackedChipId : getTrackedChipIds()) {
-            if (trackedChipId.equalsIgnoreCase(normalizedChipId)) {
-                log.warn("chipId case mismatch, requested={}, tracked={}", normalizedChipId, trackedChipId);
+        String trackedChipId = findCaseInsensitiveKey(deviceSessionMap, normalizedChipId);
+        if (trackedChipId == null) {
+            trackedChipId = findCaseInsensitiveKey(lastSeenMap, normalizedChipId);
+        }
+        if (trackedChipId != null) {
+            log.warn("chipId case mismatch, requested={}, tracked={}", normalizedChipId, trackedChipId);
+            return trackedChipId;
+        }
+        return normalizedChipId;
+    }
+
+    private String findCaseInsensitiveKey(Map<String, ?> map, String chipId) {
+        for (String trackedChipId : map.keySet()) {
+            if (trackedChipId.equalsIgnoreCase(chipId)) {
                 return trackedChipId;
             }
         }
-        return normalizedChipId;
+        return null;
     }
 
     private void logIfNormalized(String rawChipId, String normalizedChipId) {

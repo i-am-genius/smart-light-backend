@@ -211,10 +211,14 @@ public class OpsAdminLogService {
     }
 
     public static List<LogEvent> groupLogEvents(String content) {
-        List<LogEvent> events = new ArrayList<>();
-        if (content == null || content.isBlank()) return events;
-        String[] rawLines = content.split("\n");
+        if (content == null || content.isBlank()) return new ArrayList<>();
+        return groupLogEvents(Arrays.asList(content.split("\n")));
+    }
+
+    public static List<LogEvent> groupLogEvents(List<String> rawLines) {
         LogEvent current = null;
+        List<LogEvent> events = new ArrayList<>();
+        if (rawLines == null || rawLines.isEmpty()) return events;
         for (String line : rawLines) {
             boolean isLogLine = LOG_DATE_PATTERN.matcher(line).lookingAt();
             if (isLogLine) {
@@ -238,6 +242,24 @@ public class OpsAdminLogService {
             }
         }
         return events;
+    }
+
+    public static List<String> flattenEvents(List<LogEvent> events) {
+        if (events == null || events.isEmpty()) return List.of();
+        List<String> lines = new ArrayList<>();
+        for (LogEvent event : events) {
+            lines.addAll(event.lines);
+        }
+        return lines;
+    }
+
+    public static int lineHash(List<String> lines) {
+        int hash = 1;
+        if (lines == null) return hash;
+        for (String line : lines) {
+            hash = 31 * hash + (line == null ? 0 : line.hashCode());
+        }
+        return hash;
     }
 
     public static String filterEventsByLevel(List<LogEvent> events, String level) {
@@ -276,7 +298,11 @@ public class OpsAdminLogService {
                         || line.contains("Failed to obtain") || line.contains("Connection refused")
                         || line.contains("Access denied") || line.contains("Communications link")
                         || line.contains("Too many connections") || line.contains("Unknown database")
-                        || line.contains("HikariPool") || line.contains("JDBC Connection");
+                        || line.contains("HikariPool") || line.contains("JDBC Connection")
+                        || line.contains("TEXT_PARTIAL_WRITING") || line.contains("broadcastToStore failed")
+                        || line.contains("The remote endpoint was in state")
+                        || line.contains("invalid state for called method")
+                        || line.contains("sendMessage") || line.contains("ConcurrentWebSocketSessionDecorator");
                 if (keep) {
                     sb.append(line).append("\n");
                     if (sb.length() > maxChars) break;

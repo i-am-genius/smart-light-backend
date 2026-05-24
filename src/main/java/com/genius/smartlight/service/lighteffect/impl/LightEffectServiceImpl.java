@@ -3,20 +3,19 @@ package com.genius.smartlight.service.lighteffect.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
-import com.genius.smartlight.dal.dataobject.StoreDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
-import com.genius.smartlight.dal.mysql.StoreMapper;
-import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.lighteffect.LightEffectService;
+import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.lighteffect.LightEffectStateReqVO;
 import com.genius.smartlight.vo.lighteffect.LightEffectStateRespVO;
 import com.genius.smartlight.websocket.WebSocketPushService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -35,15 +34,17 @@ public class LightEffectServiceImpl implements LightEffectService {
     private static final String SCOPE_ALL = "all";
     private static final int MIN_TEMP = 2700;
     private static final int MAX_TEMP = 6500;
+    private static final long INACTIVE_STATE_TTL_MS = Duration.ofHours(24).toMillis();
 
     private final DeviceMapper deviceMapper;
-    private final StoreMapper storeMapper;
+    private final CurrentStoreService currentStoreService;
     private final WebSocketPushService webSocketPushService;
     private final ObjectMapper objectMapper;
 
     private final Object lock = new Object();
     private final Map<Long, LightEffectStateRespVO> storeStates = new ConcurrentHashMap<>();
     private final Map<Long, Set<String>> waveTargetChipIds = new ConcurrentHashMap<>();
+    private final Map<Long, Long> storeStateAccessTimes = new ConcurrentHashMap<>();
 
     @Override
     public LightEffectStateRespVO getState() {
@@ -303,20 +304,31 @@ public class LightEffectServiceImpl implements LightEffectService {
     }
 
     private Long getCurrentStoreId() {
-        Long userId = SecurityUtils.getCurrentUserId();
-        StoreDO store = storeMapper.selectOne(
-                new LambdaQueryWrapper<StoreDO>()
-                        .eq(StoreDO::getUserId, userId)
-                        .last("limit 1")
-        );
-        if (store == null) {
-            throw new ServiceException("Current user has no bound store");
-        }
-        return store.getId();
+        return currentStoreService.getCurrentStoreId();
     }
 
     private LightEffectStateRespVO getStoreState(Long storeId) {
+        storeStateAccessTimes.put(storeId, System.currentTimeMillis());
         return storeStates.computeIfAbsent(storeId, ignored -> defaultState());
+    }
+
+    @Scheduled(fixedDelay = 3_600_000L)
+    public void cleanupInactiveStoreStates() {
+        long expireBefore = System.currentTimeMillis() - INACTIVE_STATE_TTL_MS;
+        synchronized (lock) {
+            for (Long storeId : new LinkedHashSet<>(storeStates.keySet())) {
+                Long lastAccess = storeStateAccessTimes.get(storeId);
+                LightEffectStateRespVO state = storeStates.get(storeId);
+                boolean runningWave = state != null
+                        && Boolean.TRUE.equals(state.getEnabled())
+                        && EFFECT_WAVE.equals(state.getEffect());
+                boolean hasTargets = waveTargetChipIds.containsKey(storeId);
+                if (!runningWave && !hasTargets && lastAccess != null && lastAccess < expireBefore) {
+                    storeStates.remove(storeId);
+                    storeStateAccessTimes.remove(storeId);
+                }
+            }
+        }
     }
 
     private Set<String> copyTargets(Long storeId) {

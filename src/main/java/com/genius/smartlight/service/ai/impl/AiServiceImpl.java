@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
+import com.genius.smartlight.dal.dataobject.PersonFlowRecordDO;
 import com.genius.smartlight.dal.dataobject.StoreDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.StoreMapper;
@@ -13,6 +14,7 @@ import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.ai.AiService;
 import com.genius.smartlight.service.ai.MainColorResult;
 import com.genius.smartlight.service.ai.MainColorService;
+import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
 import com.genius.smartlight.vo.ai.PersonDetectRespVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
@@ -22,8 +24,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
+import java.util.Base64;
 import java.util.Locale;
 import java.util.Set;
 
@@ -43,6 +49,7 @@ public class AiServiceImpl implements AiService {
     private final WebSocketPushService webSocketPushService;
     private final MainColorService mainColorService;
     private final StoreMapper storeMapper;
+    private final PersonFlowRecordService personFlowRecordService;
 
     @Override
     public FabricRecognizeRespVO fabricRecognize(String chipId, MultipartFile file) {
@@ -70,8 +77,10 @@ public class AiServiceImpl implements AiService {
             try {
                 String maskedBase64 = result.getClothMaskedPngBase64();
                 if (maskedBase64 != null && !maskedBase64.isBlank()) {
-                    byte[] maskedBytes = java.util.Base64.getDecoder().decode(maskedBase64);
-                    colorResult = mainColorService.extract(new java.io.ByteArrayInputStream(maskedBytes));
+                    try (InputStream maskedStream = Base64.getDecoder().wrap(
+                            new ByteArrayInputStream(maskedBase64.getBytes(StandardCharsets.ISO_8859_1)))) {
+                        colorResult = mainColorService.extract(maskedStream);
+                    }
                 } else {
                     colorResult = mainColorService.extract(file.getInputStream());
                 }
@@ -138,6 +147,13 @@ public class AiServiceImpl implements AiService {
 
             Long storeId = resolveDeviceStoreIdIfOwned(chipId);
             webSocketPushService.pushPersonDetect(chipId, file.getOriginalFilename(), result, storeId);
+
+            try {
+                savePersonFlowRecord(chipId, file, result, storeId);
+            } catch (Exception e) {
+                log.error("Failed to save person_flow_record, chipId={}, filename={}", chipId, filename, e);
+            }
+
             log.info("personDetect completed, chipId={}, filename={}, count={}, costMs={}",
                     chipId, filename, result.getCount(), System.currentTimeMillis() - start);
             return result;
@@ -147,6 +163,48 @@ public class AiServiceImpl implements AiService {
                         chipId, filename, e.getMessage(), e);
             }
             throw e;
+        }
+    }
+
+    private void savePersonFlowRecord(String chipId, MultipartFile file,
+                                       PersonDetectRespVO result, Long storeId) {
+        PersonFlowRecordDO record = new PersonFlowRecordDO();
+        record.setStoreId(storeId);
+
+        try {
+            Long userId = SecurityUtils.getCurrentUserId();
+            record.setUserId(userId);
+        } catch (Exception e) {
+            log.debug("Cannot resolve current user for person_flow_record", e);
+        }
+
+        record.setChipId(chipId != null && !chipId.isBlank() ? chipId : null);
+        record.setSource("UPLOAD");
+        record.setPersonCount(result.getCount());
+        record.setConfidence(result.getConfidence());
+        record.setProcessingTime(result.getProcessingTime());
+
+        LocalDateTime detectTime = parseDetectTime(result.getTimestamp());
+        record.setDetectTime(detectTime != null ? detectTime : LocalDateTime.now());
+
+        record.setImageName(file != null ? file.getOriginalFilename() : null);
+
+        personFlowRecordService.saveRecord(record);
+    }
+
+    private LocalDateTime parseDetectTime(String timestamp) {
+        if (timestamp == null || timestamp.isBlank()) {
+            return null;
+        }
+        try {
+            return LocalDateTime.parse(timestamp, java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        } catch (Exception e) {
+            try {
+                return LocalDateTime.parse(timestamp, java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+            } catch (Exception e2) {
+                log.debug("Cannot parse detect timestamp: {}", timestamp);
+                return null;
+            }
         }
     }
 

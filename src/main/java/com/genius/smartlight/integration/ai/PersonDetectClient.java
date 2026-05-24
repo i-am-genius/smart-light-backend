@@ -4,6 +4,7 @@ import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.vo.ai.PersonDetectRespVO;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -32,7 +33,19 @@ public class PersonDetectClient {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
 
-            HttpEntity<byte[]> requestEntity = new HttpEntity<>(file.getBytes(), headers);
+            InputStreamResource resource = new InputStreamResource(file.getInputStream()) {
+                @Override
+                public String getFilename() {
+                    return file.getOriginalFilename() != null ? file.getOriginalFilename() : "image.jpg";
+                }
+
+                @Override
+                public long contentLength() {
+                    return file.getSize();
+                }
+            };
+
+            HttpEntity<InputStreamResource> requestEntity = new HttpEntity<>(resource, headers);
 
             ResponseEntity<PersonDetectRespVO> response = restTemplate.exchange(
                     flowUrl,

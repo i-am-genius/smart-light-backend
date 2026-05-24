@@ -4,7 +4,7 @@ import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -32,10 +32,15 @@ public class FabricAiClient {
 
     public FabricRecognizeRespVO recognize(MultipartFile file, String chipId) {
         try {
-            ByteArrayResource resource = new ByteArrayResource(file.getBytes()) {
+            InputStreamResource resource = new InputStreamResource(file.getInputStream()) {
                 @Override
                 public String getFilename() {
                     return file.getOriginalFilename() != null ? file.getOriginalFilename() : "image.jpg";
+                }
+
+                @Override
+                public long contentLength() {
+                    return file.getSize();
                 }
             };
 

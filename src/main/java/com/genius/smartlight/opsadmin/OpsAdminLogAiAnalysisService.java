@@ -80,9 +80,9 @@ public class OpsAdminLogAiAnalysisService {
         List<String> lines = readResult.lines;
 
         // Group into events first, then filter out internal AI events at event level
-        List<OpsAdminLogService.LogEvent> events = OpsAdminLogService.groupLogEvents(String.join("\n", lines));
+        List<OpsAdminLogService.LogEvent> events = OpsAdminLogService.groupLogEvents(lines);
         events = events.stream().filter(e -> !isInternalAiEvent(e)).toList();
-        lines = events.stream().flatMap(e -> e.lines.stream()).toList();
+        lines = OpsAdminLogService.flattenEvents(events);
 
         if (!lines.isEmpty() && !events.isEmpty()) {
             String firstLine = lines.get(0);
@@ -92,17 +92,18 @@ public class OpsAdminLogAiAnalysisService {
                     extractTimePrefix(events.get(0).firstLine),
                     extractTimePrefix(events.get(events.size() - 1).firstLine),
                     Math.abs(firstLine.hashCode()), Math.abs(lastLine.hashCode()),
-                    Math.abs(String.join("", lines).hashCode()));
+                    Math.abs(OpsAdminLogService.lineHash(lines)));
         }
         String diagnosticLines = OpsAdminLogService.buildDiagnosticContext(events, 4000);
-        List<String> diagList = List.of(diagnosticLines.split("\n"));
+        List<String> diagList = diagnosticLines.lines().toList();
 
         boolean detailMode = Boolean.TRUE.equals(req.getDetailMode());
         OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult = ruleAnalyzer.analyze(diagList, req.getAnalysisMode());
 
         boolean hasStacks = diagnosticLines.lines().anyMatch(this::isStackTraceLine);
-        log.info("[ops-admin] AI analysis context prepared, hasStacks={}, eventCount={}, contextLineCount={}, rawLineCount={}, detailMode={}, logType={}",
-                hasStacks, events.size(), diagList.size(), lines.size(), detailMode, req.getLogType());
+        boolean forceAi = shouldForceAi(diagnosticLines, ruleResult, hasStacks);
+        log.info("[ops-admin] AI analysis context prepared, hasStacks={}, forceAi={}, eventCount={}, contextLineCount={}, rawLineCount={}, detailMode={}, logType={}",
+                hasStacks, forceAi, events.size(), diagList.size(), lines.size(), detailMode, req.getLogType());
 
         if (log.isDebugEnabled()) {
             String preview = diagnosticLines.length() > 200
@@ -127,10 +128,10 @@ public class OpsAdminLogAiAnalysisService {
         boolean aiAvailable = isAiAvailable();
 
         if (aiAvailable) {
-            boolean needAi = (detailMode && hasStacks) || !isRuleEnough(ruleResult, hasStacks);
+            boolean needAi = forceAi || (detailMode && hasStacks) || !isRuleEnough(ruleResult, hasStacks, diagnosticLines);
             if (needAi) {
-                log.info("[ops-admin] Rule analysis not enough, calling AI, hasStacks={}, detailMode={}, ruleLevel={}, ruleProblems={}, inputLines={}",
-                        hasStacks, detailMode, ruleResult.level, ruleResult.problems.size(), lines.size());
+                log.info("[ops-admin] Rule analysis not enough, calling AI, hasStacks={}, forceAi={}, detailMode={}, ruleLevel={}, ruleProblems={}, inputLines={}",
+                        hasStacks, forceAi, detailMode, ruleResult.level, ruleResult.problems.size(), lines.size());
                 try {
                     String displayOrder = req.getDisplayOrder() != null ? req.getDisplayOrder() : "oldestFirst";
                     boolean onlyErrorWarn = Boolean.TRUE.equals(req.getOnlyErrorWarn());
@@ -147,8 +148,8 @@ public class OpsAdminLogAiAnalysisService {
                 }
             } else {
                 skipReason = "RULE_ENOUGH";
-                log.info("[ops-admin] AI skipped because rule analysis is enough, reason={}, ruleLevel={}, ruleProblems={}, hasStacks={}, detailMode={}, inputLines={}",
-                        skipReason, ruleResult.level, ruleResult.problems.size(), hasStacks, detailMode, lines.size());
+                log.info("[ops-admin] AI skipped because rule analysis is enough, reason={}, ruleLevel={}, ruleProblems={}, hasStacks={}, forceAi={}, detailMode={}, inputLines={}",
+                        skipReason, ruleResult.level, ruleResult.problems.size(), hasStacks, forceAi, detailMode, lines.size());
             }
         } else {
             fallbackReason = "AI_UNAVAILABLE";
@@ -268,24 +269,121 @@ public class OpsAdminLogAiAnalysisService {
         return aiEnabled && !aiBaseUrl.isBlank() && !aiApiKey.isBlank();
     }
 
-    private boolean isRuleEnough(OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult, boolean hasStacks) {
-        // Rule found concrete problems: enough without AI
-        if (!ruleResult.problems.isEmpty()
-                && ruleResult.level != null
-                && !"normal".equals(ruleResult.level)
-                && !ruleResult.suggestions.isEmpty()
-                && ruleResult.summary != null && !ruleResult.summary.isBlank()
-                && !ruleResult.relatedLogs.isEmpty()) {
+    private boolean isRuleEnough(OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult, boolean hasStacks, String diagnosticLines) {
+        if (shouldForceAi(diagnosticLines, ruleResult, hasStacks)) {
+            return false;
+        }
+        if (isStandaloneClientAbort(diagnosticLines)) {
             return true;
         }
-        // Rule says normal and has no problems: clean log, AI not needed
+        // Clean log: AI not needed.
         if ("normal".equals(ruleResult.level)
                 && ruleResult.problems.isEmpty()
                 && !hasStacks) {
             return true;
         }
-        // Otherwise rule is not enough
-        return false;
+        // Only clear low-risk logs should skip AI. Medium/high/critical rule hits
+        // still benefit from AI when it is available.
+        return isClearLowRisk(ruleResult, diagnosticLines);
+    }
+
+    private boolean shouldForceAi(String diagnosticLines,
+                                  OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult,
+                                  boolean hasStacks) {
+        String text = diagnosticLines != null ? diagnosticLines : "";
+        if (isStandaloneClientAbort(text)) {
+            return false;
+        }
+        if (hasStacks) {
+            return true;
+        }
+        return containsAnyText(text,
+                "IllegalStateException",
+                "WebSocket broadcastToStore failed",
+                "WebSocket broadcastAll failed",
+                "event=send_failed",
+                "sendMessage",
+                "TEXT_PARTIAL_WRITING",
+                "The remote endpoint was in state",
+                "invalid state for called method",
+                "CannotGetJdbcConnectionException",
+                "Access denied for user",
+                "MyBatisSystemException",
+                "\"status\":500",
+                " 500 ",
+                "Unhandled server exception")
+                || hasMultipleExceptionChains(text)
+                || hasMediumOrHigherProblem(ruleResult);
+    }
+
+    private boolean isClearLowRisk(OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult, String diagnosticLines) {
+        if (ruleResult == null || ruleResult.problems == null || ruleResult.problems.isEmpty()) {
+            return false;
+        }
+        boolean allLow = ruleResult.problems.stream()
+                .allMatch(p -> "low".equalsIgnoreCase(p.getSeverity()));
+        if (allLow) {
+            return true;
+        }
+        return isStandaloneClientAbort(diagnosticLines);
+    }
+
+    private boolean hasMediumOrHigherProblem(OpsAdminLogRuleAnalyzer.AnalysisResult ruleResult) {
+        return ruleResult != null
+                && ruleResult.problems != null
+                && ruleResult.problems.stream()
+                .anyMatch(p -> !"low".equalsIgnoreCase(p.getSeverity()));
+    }
+
+    private boolean isStandaloneClientAbort(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        boolean hasClientAbort = containsAnyText(text,
+                "ClientAbortException",
+                "Broken pipe",
+                "AsyncRequestNotUsableException",
+                "Response not usable after response errors",
+                "Connection reset by peer");
+        if (!hasClientAbort) {
+            return false;
+        }
+        return !containsAnyText(text,
+                "TEXT_PARTIAL_WRITING",
+                "WebSocket broadcastToStore failed",
+                "WebSocket broadcastAll failed",
+                "The remote endpoint was in state",
+                "invalid state for called method",
+                "CannotGetJdbcConnectionException",
+                "Access denied for user",
+                "MyBatisSystemException",
+                "AI recognition failed",
+                "fabricRecognize failed",
+                "personDetection failed");
+    }
+
+    private boolean hasMultipleExceptionChains(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        int causedByCount = countOccurrences(text, "Caused by:");
+        if (causedByCount >= 2) {
+            return true;
+        }
+        return countOccurrences(text, "Exception:") >= 2;
+    }
+
+    private int countOccurrences(String text, String needle) {
+        int count = 0;
+        int fromIndex = 0;
+        while (true) {
+            int index = text.indexOf(needle, fromIndex);
+            if (index < 0) {
+                return count;
+            }
+            count++;
+            fromIndex = index + needle.length();
+        }
     }
 
     // ─── AI call + parse ────────────────────────────────────────────
@@ -628,12 +726,11 @@ public class OpsAdminLogAiAnalysisService {
 
         // rootCauseCategory
         String rootCause = "Unknown";
-        String allText = String.join("\n", lines);
-        if (allText.contains("Access denied") || allText.contains("SQLException") || allText.contains("JDBC Connection")) rootCause = "Database";
-        else if (allText.contains("Connection refused") || allText.contains("timeout") || allText.contains("502")) rootCause = "Network";
-        else if (allText.contains("403") || allText.contains("Forbidden") || allText.contains("AccessDenied")) rootCause = "Permission";
-        else if (allText.contains("Could not resolve placeholder") || allText.contains("PlaceholderResolution")) rootCause = "Configuration";
-        else if (allText.contains("open-meteo") || allText.contains("deepseek") || allText.contains("API")) rootCause = "ThirdParty";
+        if (containsAny(lines, "Access denied", "SQLException", "JDBC Connection")) rootCause = "Database";
+        else if (containsAny(lines, "Connection refused", "timeout", "502")) rootCause = "Network";
+        else if (containsAny(lines, "403", "Forbidden", "AccessDenied")) rootCause = "Permission";
+        else if (containsAny(lines, "Could not resolve placeholder", "PlaceholderResolution")) rootCause = "Configuration";
+        else if (containsAny(lines, "open-meteo", "deepseek", "API")) rootCause = "ThirdParty";
         ta.setRootCauseCategory(rootCause);
 
         ta.setStackSummary(projectChain.isEmpty() ? "未提取到项目堆栈信息" : "主要定位至 " + entry);
@@ -644,6 +741,35 @@ public class OpsAdminLogAiAnalysisService {
         if (s == null) return "";
         return s.replaceAll("password[=:][^\\s,;]+", "password=***")
                 .replaceAll("appid=[^&\\s]+", "appid=***");
+    }
+
+    private boolean containsAny(List<String> lines, String... needles) {
+        if (lines == null || lines.isEmpty()) {
+            return false;
+        }
+        for (String line : lines) {
+            if (line == null) {
+                continue;
+            }
+            for (String needle : needles) {
+                if (line.contains(needle)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean containsAnyText(String text, String... needles) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        for (String needle : needles) {
+            if (text.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String normalizeLevel(String lv) {

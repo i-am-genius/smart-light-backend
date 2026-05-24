@@ -146,12 +146,20 @@ public class AiServiceImpl implements AiService {
             PersonDetectRespVO result = personDetectClient.detect(file);
 
             Long storeId = resolveDeviceStoreIdIfOwned(chipId);
-            webSocketPushService.pushPersonDetect(chipId, file.getOriginalFilename(), result, storeId);
 
+            PersonFlowRecordDO saved = null;
             try {
-                savePersonFlowRecord(chipId, file, result, storeId);
+                saved = savePersonFlowRecord(chipId, file, result, storeId);
             } catch (Exception e) {
                 log.error("Failed to save person_flow_record, chipId={}, filename={}", chipId, filename, e);
+            }
+
+            try {
+                Long pushStoreId = saved != null ? saved.getStoreId() : storeId;
+                Long recordId = saved != null ? saved.getId() : null;
+                webSocketPushService.pushPersonDetect(chipId, file.getOriginalFilename(), result, pushStoreId, recordId);
+            } catch (Exception e) {
+                log.error("Failed to push personDetection via WebSocket, chipId={}, filename={}", chipId, filename, e);
             }
 
             log.info("personDetect completed, chipId={}, filename={}, count={}, costMs={}",
@@ -166,9 +174,13 @@ public class AiServiceImpl implements AiService {
         }
     }
 
-    private void savePersonFlowRecord(String chipId, MultipartFile file,
+    private PersonFlowRecordDO savePersonFlowRecord(String chipId, MultipartFile file,
                                        PersonDetectRespVO result, Long storeId) {
         PersonFlowRecordDO record = new PersonFlowRecordDO();
+
+        if (storeId == null) {
+            storeId = resolveStoreIdForFlowRecord(chipId);
+        }
         record.setStoreId(storeId);
 
         try {
@@ -190,6 +202,7 @@ public class AiServiceImpl implements AiService {
         record.setImageName(file != null ? file.getOriginalFilename() : null);
 
         personFlowRecordService.saveRecord(record);
+        return record;
     }
 
     private LocalDateTime parseDetectTime(String timestamp) {
@@ -231,6 +244,36 @@ public class AiServiceImpl implements AiService {
             return null;
         }
         return device.getStoreId();
+    }
+
+    private Long resolveStoreIdForFlowRecord(String chipId) {
+        if (chipId != null && !chipId.isBlank()) {
+            DeviceDO device = deviceMapper.selectOne(
+                    new LambdaQueryWrapper<DeviceDO>()
+                            .eq(DeviceDO::getChipId, chipId)
+                            .last("limit 1")
+            );
+            if (device != null && device.getStoreId() != null) {
+                return device.getStoreId();
+            }
+        }
+
+        try {
+            Long userId = SecurityUtils.getCurrentUserId();
+            StoreDO store = storeMapper.selectOne(
+                    new LambdaQueryWrapper<StoreDO>()
+                            .eq(StoreDO::getUserId, userId)
+                            .last("limit 1")
+            );
+            if (store != null) {
+                return store.getId();
+            }
+        } catch (Exception e) {
+            log.debug("Cannot resolve store from current user for flow record", e);
+        }
+
+        log.warn("Cannot resolve store_id for person_flow_record, chipId={}", chipId);
+        return null;
     }
 
     private DeviceDO updateDeviceAiResult(String chipId, FabricRecognizeRespVO result) {

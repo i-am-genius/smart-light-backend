@@ -9,13 +9,17 @@ import com.genius.smartlight.dal.mysql.StoreMapper;
 import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.vo.personflow.PersonFlowRecordRespVO;
+import com.genius.smartlight.vo.personflow.PersonFlowTrendItemVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.util.Collections;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Service
 @Slf4j
@@ -72,6 +76,70 @@ public class PersonFlowRecordServiceImpl implements PersonFlowRecordService {
         vo.setImageName(record.getImageName());
         vo.setCreateTime(record.getCreateTime());
         return vo;
+    }
+
+    @Override
+    public List<PersonFlowTrendItemVO> getTrend(LocalDateTime startTime, LocalDateTime endTime, String chipId) {
+        Long storeId = getCurrentStoreIdOrNull();
+        if (storeId == null) {
+            return List.of();
+        }
+
+        LambdaQueryWrapper<PersonFlowRecordDO> wrapper = new LambdaQueryWrapper<PersonFlowRecordDO>()
+                .eq(PersonFlowRecordDO::getStoreId, storeId)
+                .ge(startTime != null, PersonFlowRecordDO::getDetectTime, startTime)
+                .le(endTime != null, PersonFlowRecordDO::getDetectTime, endTime)
+                .eq(chipId != null && !chipId.isBlank(), PersonFlowRecordDO::getChipId, chipId)
+                .orderByAsc(PersonFlowRecordDO::getDetectTime);
+
+        List<PersonFlowRecordDO> records = personFlowRecordMapper.selectList(wrapper);
+
+        DateTimeFormatter hourFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:00");
+        Map<String, List<PersonFlowRecordDO>> bucketed = new LinkedHashMap<>();
+
+        for (PersonFlowRecordDO record : records) {
+            String key = record.getDetectTime().format(hourFmt);
+            bucketed.computeIfAbsent(key, k -> new ArrayList<>()).add(record);
+        }
+
+        List<PersonFlowTrendItemVO> result = new ArrayList<>();
+        for (Map.Entry<String, List<PersonFlowRecordDO>> entry : bucketed.entrySet()) {
+            List<PersonFlowRecordDO> bucket = entry.getValue();
+
+            int totalCount = 0;
+            int maxCount = 0;
+            int validCount = 0;
+            for (PersonFlowRecordDO r : bucket) {
+                if (r.getPersonCount() != null) {
+                    int c = r.getPersonCount();
+                    totalCount += c;
+                    if (c > maxCount) maxCount = c;
+                    validCount++;
+                }
+            }
+            double avgCount = validCount > 0 ? (double) totalCount / validCount : 0;
+
+            double avgConf = bucket.stream()
+                    .filter(r -> r.getConfidence() != null)
+                    .mapToDouble(PersonFlowRecordDO::getConfidence)
+                    .average().orElse(0);
+            double avgProc = bucket.stream()
+                    .filter(r -> r.getProcessingTime() != null)
+                    .mapToDouble(PersonFlowRecordDO::getProcessingTime)
+                    .average().orElse(0);
+
+            PersonFlowTrendItemVO item = new PersonFlowTrendItemVO();
+            item.setTime(entry.getKey());
+            item.setPersonCount(Math.round(avgCount * 10.0) / 10.0);
+            item.setTotalPersonCount(totalCount);
+            item.setAvgPersonCount(Math.round(avgCount * 10.0) / 10.0);
+            item.setMaxPersonCount(maxCount);
+            item.setDetectionCount(bucket.size());
+            item.setAvgConfidence(Math.round(avgConf * 100.0) / 100.0);
+            item.setAvgProcessingTime(Math.round(avgProc * 10.0) / 10.0);
+            result.add(item);
+        }
+        return result;
     }
 
     private Long getCurrentStoreIdOrNull() {

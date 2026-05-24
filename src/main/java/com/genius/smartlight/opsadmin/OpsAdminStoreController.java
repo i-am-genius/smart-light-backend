@@ -101,4 +101,48 @@ public class OpsAdminStoreController {
             return ApiResponse.fail("查询时间线数据失败: " + e.getMessage());
         }
     }
+
+    @GetMapping("/{storeId}/person-flow/summary")
+    public ApiResponse<Map<String, Object>> personFlowSummary(
+            @PathVariable Long storeId,
+            @RequestParam(required = false, defaultValue = "7d") String range,
+            @RequestParam(required = false) String startTime,
+            @RequestParam(required = false) String endTime) {
+        try {
+            Map<String, Object> summary = storeService.personFlowSummary(storeId, range, startTime, endTime);
+            return ApiResponse.success(summary);
+        } catch (Exception e) {
+            log.warn("[ops-admin] Failed to query person flow summary storeId={}: {}", storeId, e.getMessage());
+            return ApiResponse.fail("查询人流概览失败: " + e.getMessage());
+        }
+    }
+
+    @GetMapping("/{storeId}/person-flow/trend")
+    public ApiResponse<List<Map<String, Object>>> personFlowTrend(
+            @PathVariable Long storeId,
+            @RequestParam(required = false, defaultValue = "7d") String range,
+            @RequestParam(required = false, defaultValue = "hour") String interval,
+            @RequestParam(required = false) String startTime,
+            @RequestParam(required = false) String endTime) {
+        try {
+            List<Map<String, Object>> trend = storeService.personFlowTrend(storeId, range, interval, startTime, endTime);
+            return ApiResponse.success(trend);
+        } catch (Exception e) {
+            log.warn("[ops-admin] Failed to query person flow trend storeId={}: {}", storeId, e.getMessage());
+            return ApiResponse.fail("查询人流趋势失败: " + e.getMessage());
+        }
+    }
+
+    @GetMapping("/{storeId}/person-flow/recent")
+    public ApiResponse<List<Map<String, Object>>> personFlowRecent(
+            @PathVariable Long storeId,
+            @RequestParam(required = false, defaultValue = "10") int limit) {
+        try {
+            List<Map<String, Object>> recent = storeService.personFlowRecent(storeId, limit);
+            return ApiResponse.success(recent);
+        } catch (Exception e) {
+            log.warn("[ops-admin] Failed to query person flow recent storeId={}: {}", storeId, e.getMessage());
+            return ApiResponse.fail("查询最近人流记录失败: " + e.getMessage());
+        }
+    }
 }

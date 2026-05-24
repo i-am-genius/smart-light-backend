@@ -109,7 +109,7 @@ public class WebSocketPushService {
         broadcastToStore(storeId, "fabricRecognize", data);
     }
 
-    public void pushPersonDetect(String chipId, String filename, PersonDetectRespVO result, Long storeId) {
+    public void pushPersonDetect(String chipId, String filename, PersonDetectRespVO result, Long storeId, Long recordId) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("chipId", chipId);
         data.put("filename", filename);
@@ -117,6 +117,9 @@ public class WebSocketPushService {
         data.put("confidence", result.getConfidence());
         data.put("timestamp", result.getTimestamp());
         data.put("processingTime", result.getProcessingTime());
+        if (recordId != null) {
+            data.put("recordId", recordId);
+        }
         broadcastToStore(storeId, "personDetection", data);
     }
 

@@ -3,6 +3,7 @@ package com.genius.smartlight.controller.admin.personflow;
 import com.genius.smartlight.common.CommonResult;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.vo.personflow.PersonFlowRecordRespVO;
+import com.genius.smartlight.vo.personflow.PersonFlowTrendItemVO;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -47,5 +48,17 @@ public class PersonFlowRecordController {
             @RequestParam(defaultValue = "10") int pageSize) {
         return CommonResult.success(
                 personFlowRecordService.getList(startTime, endTime, chipId, pageNo, pageSize));
+    }
+
+    @Operation(summary = "人流趋势统计", description = "按小时统计人流检测数据，返回时间桶内的人数、检测次数、平均置信度等")
+    @GetMapping("/trend")
+    public CommonResult<List<PersonFlowTrendItemVO>> trend(
+            @Parameter(description = "开始时间，格式 yyyy-MM-dd HH:mm:ss", example = "2026-05-01 00:00:00")
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime startTime,
+            @Parameter(description = "结束时间，格式 yyyy-MM-dd HH:mm:ss", example = "2026-05-25 23:59:59")
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime endTime,
+            @Parameter(description = "设备芯片ID", example = "ABC123456")
+            @RequestParam(required = false) String chipId) {
+        return CommonResult.success(personFlowRecordService.getTrend(startTime, endTime, chipId));
     }
 }

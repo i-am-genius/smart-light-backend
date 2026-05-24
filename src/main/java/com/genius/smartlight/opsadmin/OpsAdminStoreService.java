@@ -33,6 +33,7 @@ public class OpsAdminStoreService {
     private final LuxRecordMapper luxRecordMapper;
     private final DurationRecordMapper durationRecordMapper;
     private final WeatherRecordMapper weatherRecordMapper;
+    private final PersonFlowRecordMapper personFlowRecordMapper;
 
     public List<OpsAdminStoreResp> page(OpsAdminStorePageReq req) {
         int pageSize = Math.min(Math.max(req.getPageSize(), 1), MAX_PAGE_SIZE);
@@ -724,5 +725,124 @@ public class OpsAdminStoreService {
         if ("day".equals(gran)) return dt.toLocalDate().toString();
         // hour
         return dt.toLocalDate().toString() + " " + String.format("%02d:00", dt.getHour());
+    }
+
+    // --- Person flow ---
+
+    public Map<String, Object> personFlowSummary(Long storeId, String range, String startTime, String endTime) {
+        LocalDateTime[] tr = resolveTimeRange(range, startTime, endTime);
+        List<PersonFlowRecordDO> records = personFlowRecordMapper.selectList(
+                new LambdaQueryWrapper<PersonFlowRecordDO>()
+                        .eq(PersonFlowRecordDO::getStoreId, storeId)
+                        .ge(PersonFlowRecordDO::getDetectTime, tr[0])
+                        .le(PersonFlowRecordDO::getDetectTime, tr[1]));
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (records.isEmpty()) {
+            result.put("totalPersonCount", 0);
+            result.put("totalDetectionCount", 0);
+            result.put("avgPersonCount", 0.0);
+            result.put("maxPersonCount", 0);
+            result.put("avgConfidence", 0.0);
+            result.put("avgProcessingTime", 0.0);
+            result.put("lastDetectTime", null);
+            return result;
+        }
+
+        int totalPersonCount = records.stream().mapToInt(r -> r.getPersonCount() != null ? r.getPersonCount() : 0).sum();
+        int totalDetectionCount = records.size();
+        double avgPersonCount = records.stream().mapToInt(r -> r.getPersonCount() != null ? r.getPersonCount() : 0).average().orElse(0);
+        int maxPersonCount = records.stream().mapToInt(r -> r.getPersonCount() != null ? r.getPersonCount() : 0).max().orElse(0);
+        double avgConfidence = records.stream().mapToDouble(r -> r.getConfidence() != null ? r.getConfidence() : 0).average().orElse(0);
+        double avgProcessingTime = records.stream().mapToDouble(r -> r.getProcessingTime() != null ? r.getProcessingTime() : 0).average().orElse(0);
+        LocalDateTime lastDetectTime = records.get(records.size() - 1).getDetectTime();
+
+        result.put("totalPersonCount", totalPersonCount);
+        result.put("totalDetectionCount", totalDetectionCount);
+        result.put("avgPersonCount", Math.round(avgPersonCount * 100.0) / 100.0);
+        result.put("maxPersonCount", maxPersonCount);
+        result.put("avgConfidence", Math.round(avgConfidence * 10000.0) / 10000.0);
+        result.put("avgProcessingTime", Math.round(avgProcessingTime * 10.0) / 10.0);
+        result.put("lastDetectTime", lastDetectTime != null ? fmt(lastDetectTime) : null);
+        return result;
+    }
+
+    public List<Map<String, Object>> personFlowTrend(Long storeId, String range, String interval,
+                                                      String startTime, String endTime) {
+        LocalDateTime[] tr = resolveTimeRange(range, startTime, endTime);
+        String gran = interval != null ? interval : "hour";
+        List<PersonFlowRecordDO> records = personFlowRecordMapper.selectList(
+                new LambdaQueryWrapper<PersonFlowRecordDO>()
+                        .eq(PersonFlowRecordDO::getStoreId, storeId)
+                        .ge(PersonFlowRecordDO::getDetectTime, tr[0])
+                        .le(PersonFlowRecordDO::getDetectTime, tr[1])
+                        .orderByAsc(PersonFlowRecordDO::getDetectTime));
+
+        if (records.isEmpty()) return List.of();
+
+        Map<String, List<PersonFlowRecordDO>> buckets = new LinkedHashMap<>();
+        for (PersonFlowRecordDO r : records) {
+            String key = bucketKey(r.getDetectTime(), gran);
+            buckets.computeIfAbsent(key, k -> new ArrayList<>()).add(r);
+        }
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var e : buckets.entrySet()) {
+            List<PersonFlowRecordDO> list = e.getValue();
+            int personCount = list.stream().mapToInt(r -> r.getPersonCount() != null ? r.getPersonCount() : 0).sum();
+            int detectionCount = list.size();
+            double avgConfidence = list.stream().mapToDouble(r -> r.getConfidence() != null ? r.getConfidence() : 0).average().orElse(0);
+            double avgProcessingTime = list.stream().mapToDouble(r -> r.getProcessingTime() != null ? r.getProcessingTime() : 0).average().orElse(0);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("time", e.getKey());
+            m.put("personCount", personCount);
+            m.put("detectionCount", detectionCount);
+            m.put("avgConfidence", Math.round(avgConfidence * 10000.0) / 10000.0);
+            m.put("avgProcessingTime", Math.round(avgProcessingTime * 10.0) / 10.0);
+            result.add(m);
+        }
+        return result;
+    }
+
+    public List<Map<String, Object>> personFlowRecent(Long storeId, int limit) {
+        int effectiveLimit = Math.min(Math.max(limit, 1), 50);
+        List<PersonFlowRecordDO> records = personFlowRecordMapper.selectList(
+                new LambdaQueryWrapper<PersonFlowRecordDO>()
+                        .eq(PersonFlowRecordDO::getStoreId, storeId)
+                        .orderByDesc(PersonFlowRecordDO::getDetectTime)
+                        .last("LIMIT " + effectiveLimit));
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (PersonFlowRecordDO r : records) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", r.getId());
+            m.put("detectTime", fmt(r.getDetectTime()));
+            m.put("personCount", r.getPersonCount());
+            m.put("confidence", r.getConfidence());
+            m.put("processingTime", r.getProcessingTime());
+            m.put("chipId", r.getChipId());
+            m.put("source", r.getSource());
+            m.put("imageName", r.getImageName());
+            result.add(m);
+        }
+        return result;
+    }
+
+    private LocalDateTime[] resolveTimeRange(String range, String startTime, String endTime) {
+        if (isNotBlank(startTime) && isNotBlank(endTime)) {
+            LocalDateTime s = parseDt(startTime);
+            LocalDateTime e = parseDt(endTime);
+            if (s != null && e != null) return new LocalDateTime[]{s, e};
+        }
+        LocalDateTime end = LocalDateTime.now();
+        LocalDateTime start;
+        if ("today".equals(range)) {
+            start = end.toLocalDate().atStartOfDay();
+        } else if ("30d".equals(range)) {
+            start = end.minusDays(30);
+        } else {
+            start = end.minusDays(7);
+        }
+        return new LocalDateTime[]{start, end};
     }
 }

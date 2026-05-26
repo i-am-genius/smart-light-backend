@@ -15,7 +15,7 @@ import java.util.Date;
 @Service
 public class JwtTokenService {
 
-    private static final String LOCAL_DEV_DEFAULT_SECRET = "smart-light-secret-2026";
+    private static final String LOCAL_DEV_DEFAULT_SECRET = "smart-light-dev-secret-at-least-32-chars-2026";
 
     private final Environment environment;
 

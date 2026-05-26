@@ -3,11 +3,9 @@ package com.genius.smartlight.service.personflow.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.genius.smartlight.dal.dataobject.PersonFlowRecordDO;
-import com.genius.smartlight.dal.dataobject.StoreDO;
 import com.genius.smartlight.dal.mysql.PersonFlowRecordMapper;
-import com.genius.smartlight.dal.mysql.StoreMapper;
-import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
+import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.personflow.PersonFlowRecordRespVO;
 import com.genius.smartlight.vo.personflow.PersonFlowTrendItemVO;
 import lombok.RequiredArgsConstructor;
@@ -27,7 +25,7 @@ import java.util.Map;
 public class PersonFlowRecordServiceImpl implements PersonFlowRecordService {
 
     private final PersonFlowRecordMapper personFlowRecordMapper;
-    private final StoreMapper storeMapper;
+    private final CurrentStoreService currentStoreService;
 
     @Override
     public void saveRecord(PersonFlowRecordDO record) {
@@ -38,9 +36,12 @@ public class PersonFlowRecordServiceImpl implements PersonFlowRecordService {
 
     @Override
     public List<PersonFlowRecordRespVO> getRecentRecords(int limit) {
-        Long storeId = getCurrentStoreIdOrNull();
+        Long storeId = getCurrentStoreId();
+        if (storeId == null) {
+            return List.of();
+        }
         LambdaQueryWrapper<PersonFlowRecordDO> wrapper = new LambdaQueryWrapper<PersonFlowRecordDO>()
-                .eq(storeId != null, PersonFlowRecordDO::getStoreId, storeId)
+                .eq(PersonFlowRecordDO::getStoreId, storeId)
                 .orderByDesc(PersonFlowRecordDO::getDetectTime)
                 .last("LIMIT " + Math.min(limit, 50));
 
@@ -51,9 +52,12 @@ public class PersonFlowRecordServiceImpl implements PersonFlowRecordService {
     @Override
     public List<PersonFlowRecordRespVO> getList(LocalDateTime startTime, LocalDateTime endTime,
                                                  String chipId, int pageNo, int pageSize) {
-        Long storeId = getCurrentStoreIdOrNull();
+        Long storeId = getCurrentStoreId();
+        if (storeId == null) {
+            return List.of();
+        }
         LambdaQueryWrapper<PersonFlowRecordDO> wrapper = new LambdaQueryWrapper<PersonFlowRecordDO>()
-                .eq(storeId != null, PersonFlowRecordDO::getStoreId, storeId)
+                .eq(PersonFlowRecordDO::getStoreId, storeId)
                 .ge(startTime != null, PersonFlowRecordDO::getDetectTime, startTime)
                 .le(endTime != null, PersonFlowRecordDO::getDetectTime, endTime)
                 .eq(chipId != null && !chipId.isBlank(), PersonFlowRecordDO::getChipId, chipId)
@@ -80,7 +84,7 @@ public class PersonFlowRecordServiceImpl implements PersonFlowRecordService {
 
     @Override
     public List<PersonFlowTrendItemVO> getTrend(LocalDateTime startTime, LocalDateTime endTime, String chipId) {
-        Long storeId = getCurrentStoreIdOrNull();
+        Long storeId = getCurrentStoreId();
         if (storeId == null) {
             return List.of();
         }
@@ -142,15 +146,9 @@ public class PersonFlowRecordServiceImpl implements PersonFlowRecordService {
         return result;
     }
 
-    private Long getCurrentStoreIdOrNull() {
+    private Long getCurrentStoreId() {
         try {
-            Long userId = SecurityUtils.getCurrentUserId();
-            StoreDO store = storeMapper.selectOne(
-                    new LambdaQueryWrapper<StoreDO>()
-                            .eq(StoreDO::getUserId, userId)
-                            .last("LIMIT 1")
-            );
-            return store != null ? store.getId() : null;
+            return currentStoreService.getCurrentStoreId();
         } catch (Exception e) {
             log.debug("Cannot resolve current store id", e);
             return null;

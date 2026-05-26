@@ -5,12 +5,10 @@ import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.duration.DurationConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.dataobject.DurationRecordDO;
-import com.genius.smartlight.dal.dataobject.StoreDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.DurationRecordMapper;
-import com.genius.smartlight.dal.mysql.StoreMapper;
-import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.duration.DurationService;
+import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.duration.DurationCreateReqVO;
 import com.genius.smartlight.vo.duration.DurationDeviceSummaryRespVO;
 import com.genius.smartlight.vo.duration.DurationRespVO;
@@ -30,19 +28,7 @@ public class DurationServiceImpl implements DurationService {
     private final WebSocketPushService webSocketPushService;
     private final DurationRecordMapper durationRecordMapper;
     private final DeviceMapper deviceMapper;
-    private final StoreMapper storeMapper;
-
-    private Long getCurrentStoreId() {
-        Long userId = SecurityUtils.getCurrentUserId();
-        StoreDO store = storeMapper.selectOne(
-                new LambdaQueryWrapper<StoreDO>()
-                        .eq(StoreDO::getUserId, userId)
-        );
-        if (store == null) {
-            throw new ServiceException("当前用户未绑定店铺");
-        }
-        return store.getId();
-    }
+    private final CurrentStoreService currentStoreService;
 
     @Override
     public Long createOrIncrease(DurationCreateReqVO reqVO) {
@@ -96,7 +82,7 @@ public class DurationServiceImpl implements DurationService {
 
     @Override
     public DurationRespVO getByChipIdAndDate(String chipId, LocalDate statDate) {
-        Long storeId = getCurrentStoreId();
+        Long storeId = currentStoreService.getCurrentStoreId();
         DurationRecordDO record = durationRecordMapper.selectOne(
                 new LambdaQueryWrapper<DurationRecordDO>()
                         .eq(DurationRecordDO::getChipId, chipId)
@@ -111,7 +97,7 @@ public class DurationServiceImpl implements DurationService {
 
     @Override
     public List<DurationRespVO> getListByChipId(String chipId) {
-        Long storeId = getCurrentStoreId();
+        Long storeId = currentStoreService.getCurrentStoreId();
         List<DurationRecordDO> list = durationRecordMapper.selectList(
                 new LambdaQueryWrapper<DurationRecordDO>()
                         .eq(DurationRecordDO::getChipId, chipId)
@@ -127,7 +113,7 @@ public class DurationServiceImpl implements DurationService {
             throw new ServiceException("开始日期不能晚于结束日期");
         }
 
-        Long storeId = getCurrentStoreId();
+        Long storeId = currentStoreService.getCurrentStoreId();
         List<DurationRecordDO> list = durationRecordMapper.selectList(
                 new LambdaQueryWrapper<DurationRecordDO>()
                         .eq(DurationRecordDO::getChipId, chipId)
@@ -145,7 +131,7 @@ public class DurationServiceImpl implements DurationService {
             throw new ServiceException("开始日期不能晚于结束日期");
         }
 
-        Long storeId = getCurrentStoreId();
+        Long storeId = currentStoreService.getCurrentStoreId();
         Long total = durationRecordMapper.sumDurationByDateRange(storeId, chipId, startDate, endDate);
 
         DurationSumRespVO respVO = new DurationSumRespVO();
@@ -162,7 +148,7 @@ public class DurationServiceImpl implements DurationService {
             throw new ServiceException("开始日期不能晚于结束日期");
         }
 
-        Long storeId = getCurrentStoreId();
+        Long storeId = currentStoreService.getCurrentStoreId();
         String normalizedChipId = normalizeChipId(chipId);
         if (normalizedChipId != null) {
             DeviceDO device = deviceMapper.selectOne(

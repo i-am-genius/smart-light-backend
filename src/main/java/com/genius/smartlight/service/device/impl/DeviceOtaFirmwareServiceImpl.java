@@ -8,6 +8,7 @@ import com.genius.smartlight.dal.mysql.OtaFirmwareMapper;
 import com.genius.smartlight.service.device.DeviceOtaFirmwareService;
 import com.genius.smartlight.vo.device.DeviceOtaFirmwareRespVO;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -25,6 +26,9 @@ import java.util.Locale;
 public class DeviceOtaFirmwareServiceImpl implements DeviceOtaFirmwareService {
 
     private static final String LOCALHOST_ERROR = "请使用电脑局域网IP访问后端后再上传固件，否则ESP8266无法下载固件";
+
+    @Value("${ota.firmware.max-size-mb:4}")
+    private int maxSizeMb;
 
     private final OtaFirmwareMapper otaFirmwareMapper;
 
@@ -132,6 +136,11 @@ public class DeviceOtaFirmwareServiceImpl implements DeviceOtaFirmwareService {
     private void validateFile(MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new ServiceException("固件文件不能为空");
+        }
+
+        long maxSizeBytes = (long) maxSizeMb * 1024L * 1024L;
+        if (file.getSize() > maxSizeBytes) {
+            throw new ServiceException("固件文件大小不能超过 " + maxSizeMb + "MB");
         }
 
         String originalFilename = file.getOriginalFilename();

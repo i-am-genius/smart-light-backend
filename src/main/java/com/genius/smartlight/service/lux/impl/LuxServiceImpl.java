@@ -5,12 +5,10 @@ import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.lux.LuxConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.dataobject.LuxRecordDO;
-import com.genius.smartlight.dal.dataobject.StoreDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.LuxRecordMapper;
-import com.genius.smartlight.dal.mysql.StoreMapper;
-import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.lux.LuxService;
+import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.lux.LuxCreateReqVO;
 import com.genius.smartlight.vo.lux.LuxRespVO;
 import com.genius.smartlight.websocket.WebSocketPushService;
@@ -28,7 +26,7 @@ public class LuxServiceImpl implements LuxService {
 
     private final LuxRecordMapper luxRecordMapper;
     private final DeviceMapper deviceMapper;
-    private final StoreMapper storeMapper;
+    private final CurrentStoreService currentStoreService;
     private final WebSocketPushService webSocketPushService;
 
     @Override
@@ -63,7 +61,7 @@ public class LuxServiceImpl implements LuxService {
 
     @Override
     public LuxRespVO getLatestLuxRecord(String chipId) {
-        Long currentStoreId = getCurrentStoreId();
+        Long currentStoreId = currentStoreService.getCurrentStoreId();
         ensureDeviceInCurrentStore(chipId, currentStoreId);
 
         LuxRecordDO record = luxRecordMapper.selectOne(
@@ -82,7 +80,7 @@ public class LuxServiceImpl implements LuxService {
 
     @Override
     public List<LuxRespVO> getLuxRecordList(String chipId) {
-        Long currentStoreId = getCurrentStoreId();
+        Long currentStoreId = currentStoreService.getCurrentStoreId();
         ensureDeviceInCurrentStore(chipId, currentStoreId);
 
         List<LuxRecordDO> list = luxRecordMapper.selectList(
@@ -93,21 +91,6 @@ public class LuxServiceImpl implements LuxService {
         );
 
         return list.stream().map(LuxConvert::convert).toList();
-    }
-
-    private Long getCurrentStoreId() {
-        Long userId = SecurityUtils.getCurrentUserId();
-
-        StoreDO store = storeMapper.selectOne(
-                new LambdaQueryWrapper<StoreDO>()
-                        .eq(StoreDO::getUserId, userId)
-        );
-
-        if (store == null) {
-            throw new ServiceException("当前用户未绑定店铺");
-        }
-
-        return store.getId();
     }
 
     private void ensureDeviceInCurrentStore(String chipId, Long currentStoreId) {

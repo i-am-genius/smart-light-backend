@@ -32,10 +32,6 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         // CORS 预检请求放行
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                        .requestMatchers(HttpMethod.GET, "/admin/ai/fabric-archive").permitAll()
-                        // DELETE /admin/ai/fabric-archive is public for demo/intranet/contest only;
-                        // production should add login or an admin secret.
-                        .requestMatchers(HttpMethod.DELETE, "/admin/ai/fabric-archive").permitAll()
                         // 登录注册放行
                         .requestMatchers(
                                 "/api/auth/login",

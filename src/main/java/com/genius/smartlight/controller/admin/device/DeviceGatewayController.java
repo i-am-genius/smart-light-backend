@@ -112,7 +112,7 @@ public class DeviceGatewayController {
         return device;
     }
 
-    @Operation(summary = "控制设备云台方向", description = "根据 chipId 向设备 WebSocket 下发云台/机械臂控制指令。请求体支持 action、兼容字段 direction、speed 和 position。")
+    @Operation(summary = "控制设备云台方向/速度/摇杆", description = "根据 chipId 向设备 WebSocket 下发云台/机械臂控制指令。支持 arm_joystick(摇杆连续)、arm_stop(停止)、arm_position(精确位置)、arm_speed(切速度)、arm(方向动作/旧协议兼容)。")
     @PostMapping("/arm/{chipId}")
     public CommonResult<Boolean> armControl(
             @Parameter(description = "芯片唯一ID", example = "ABC123456")
@@ -121,19 +121,58 @@ public class DeviceGatewayController {
         DeviceDO device = getDeviceByChipIdForCurrentStore(chipId);
 
         String deviceType = normalizeArmDeviceType(device.getDeviceType());
-        String action = resolveArmAction(reqVO);
-        String speed = normalizeArmSpeed(reqVO.getSpeed());
-
-        validateArmAction(deviceType, action);
-        validateSliderPosition(deviceType, action, reqVO.getPosition());
+        String messageType = normalizeText(reqVO.getType());
+        // 默认为 arm，兼容旧客户端
+        if (messageType == null) {
+            messageType = "arm";
+        }
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", "arm");
-        payload.put("action", action);
-        payload.put("speed", speed);
-        payload.put("deviceType", "camlamp".equals(deviceType) ? "cam" : deviceType);
-        if ("slider_position".equals(action)) {
-            payload.put("position", reqVO.getPosition());
+
+        switch (messageType) {
+            case "arm_joystick": {
+                // 摇杆连续控制 — 透传，不补 speed
+                payload.put("type", "arm_joystick");
+                payload.put("x", reqVO.getX() != null ? reqVO.getX() : 0f);
+                payload.put("y", reqVO.getY() != null ? reqVO.getY() : 0f);
+                payload.put("durationMs", reqVO.getDurationMs() != null ? reqVO.getDurationMs() : 500);
+                break;
+            }
+            case "arm_stop": {
+                // 摇杆停止 — 透传
+                payload.put("type", "arm_stop");
+                break;
+            }
+            case "arm_position": {
+                // 精确位置控制 — 透传，允许部分字段
+                payload.put("type", "arm_position");
+                if (reqVO.getPan() != null) payload.put("pan", reqVO.getPan());
+                if (reqVO.getTilt() != null) payload.put("tilt", reqVO.getTilt());
+                if (reqVO.getSlider() != null) payload.put("slider", reqVO.getSlider());
+                break;
+            }
+            case "arm_speed": {
+                // 单独发送速度，不触发方向动作
+                String speed = normalizeArmSpeed(reqVO.getSpeed());
+                payload.put("type", "arm_speed");
+                payload.put("speed", speed);
+                break;
+            }
+            default: {
+
+                String action = resolveArmAction(reqVO);
+                validateArmAction(deviceType, action);
+                validateSliderPosition(deviceType, action, reqVO.getPosition());
+
+                payload.put("type", "arm");
+                payload.put("action", action);
+                payload.put("deviceType", "camlamp".equals(deviceType) ? "cam" : deviceType);
+                if ("slider_position".equals(action)) {
+                    payload.put("position", reqVO.getPosition());
+                }
+                // 不再在 arm 消息里附带 speed
+                break;
+            }
         }
 
         sendToDevice(chipId, payload);

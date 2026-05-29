@@ -479,11 +479,11 @@ sequenceDiagram
     participant WSP as WebSocketPushService
 
     App->>API: POST /admin/ai/fabric-recognize (multipart, chipId?)
-    API->>API: 验证图片 (格式/大小/魔数)
+    API->>API: 验证图片 (格式/大小)
     API->>AI: POST /predict (图片)
     AI-->>API: {fabric, confidence, annotated_image}
     API->>API: MainColorService 提取主色 RGB
-    API->>API: 面料调整: cotton +5亮度, polyester +150K
+    API->>API: 根据识别结果给出推荐参数
     API->>DB: 更新设备 recommendedBrightness/Temp/fabric/mainColor
     API->>WSP: pushFabricRecognize()
     WSP->>App: WebSocket fabricRecognize 推送

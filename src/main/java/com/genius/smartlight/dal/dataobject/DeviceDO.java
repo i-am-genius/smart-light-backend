@@ -30,6 +30,9 @@ public class DeviceDO {
     @TableField("ip")
     private String ip;
 
+    @TableField("last_seen_at")
+    private LocalDateTime lastSeenAt;
+
     @TableField("brightness")
     private Integer brightness;
 
@@ -62,6 +65,12 @@ public class DeviceDO {
 
     @TableField("ota_status")
     private String otaStatus;
+
+    @TableField("self_test_json")
+    private String selfTestJson;
+
+    @TableField("self_test_time")
+    private LocalDateTime selfTestTime;
 
     @TableField("create_time")
     private LocalDateTime createTime;

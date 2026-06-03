@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
+import com.genius.smartlight.service.device.DeviceLastSeenService;
 import com.genius.smartlight.service.device.DeviceOnlinePushService;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +30,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
     private final DeviceMapper deviceMapper;
     private final WebSocketPushService webSocketPushService;
     private final OtaProgressStore otaProgressStore;
+    private final DeviceLastSeenService deviceLastSeenService;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
@@ -49,10 +51,18 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                     log.warn("Device register missing chipId, sessionId={}", session.getId());
                     return;
                 }
+                boolean wasOnline = deviceSessionManager.isOnline(chipId);
                 log.info("[ws] event=device_registered, wsType=device, chipId={}, sessionId={}, clientIp={}",
                         chipId, session.getId(), getRemoteAddr(session));
                 deviceSessionManager.registerDevice(chipId, session);
+                Long lastSeen = deviceSessionManager.getLastSeen(chipId);
+                if (wasOnline) {
+                    deviceLastSeenService.persistIfDue(chipId, lastSeen);
+                } else {
+                    deviceLastSeenService.persistNow(chipId, lastSeen);
+                }
                 syncFirmwareInfo(chipId, node);
+                pushSavedStateToDevice(chipId);
                 deviceOnlinePushService.pushIfChanged(chipId);
                 session.sendMessage(new TextMessage("{\"type\":\"registerAck\",\"data\":\"ok\"}"));
                 return;
@@ -62,6 +72,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 chipId = deviceSessionManager.normalizeChipId(chipId);
                 if (chipId != null) {
                     deviceSessionManager.touch(chipId);
+                    deviceLastSeenService.persistIfDue(chipId, deviceSessionManager.getLastSeen(chipId));
                     deviceOnlinePushService.pushIfChanged(chipId);
                 }
                 session.sendMessage(new TextMessage("{\"type\":\"pong\",\"data\":\"ok\"}"));
@@ -129,12 +140,30 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
         Integer otaProgress = readOptionalInt(node, "otaProgress");
         progressChanged = updateOtaProgress(chipId, oldOtaStatus, newOtaStatus, otaProgress, otaStatusReported);
 
+        if (device.getSelfTestJson() != null || device.getSelfTestTime() != null) {
+            device.setSelfTestJson(null);
+            device.setSelfTestTime(null);
+            changed = true;
+        }
+
         if (changed) {
             deviceMapper.updateById(device);
         }
         if (changed || progressChanged) {
             webSocketPushService.pushState(DeviceConvert.convert(device));
         }
+    }
+
+    private void pushSavedStateToDevice(String chipId) {
+        DeviceDO device = deviceMapper.selectOne(
+                new LambdaQueryWrapper<DeviceDO>()
+                        .eq(DeviceDO::getChipId, chipId)
+        );
+        if (device == null) {
+            return;
+        }
+
+        webSocketPushService.pushStateToDevice(chipId, DeviceConvert.convert(device));
     }
 
     private boolean updateOtaProgress(String chipId, String oldStatus, String newStatus, Integer progress, boolean statusReported) {

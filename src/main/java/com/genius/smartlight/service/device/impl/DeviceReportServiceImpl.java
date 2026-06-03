@@ -5,6 +5,7 @@ import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
+import com.genius.smartlight.service.device.DeviceLastSeenService;
 import com.genius.smartlight.service.device.DeviceReportService;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.device.DeviceRespVO;
@@ -14,9 +15,12 @@ import com.genius.smartlight.websocket.WebSocketPushService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.Locale;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -27,50 +31,36 @@ public class DeviceReportServiceImpl implements DeviceReportService {
     private final WebSocketPushService webSocketPushService;
     private final DeviceSessionManager deviceSessionManager;
     private final OtaProgressStore otaProgressStore;
+    private final ObjectMapper objectMapper;
+    private final DeviceLastSeenService deviceLastSeenService;
 
     @Override
     public void reportState(DeviceStateReportReqVO reqVO) {
+        long totalStartNs = System.nanoTime();
         String chipId = reqVO.getChipId();
+        log.debug("[STATE-REPORT-PERF] chipId={} step=start", chipId);
         log.debug("Device state report, chipId={} ip={} brightness={} temp={} autoMode={}",
                 chipId, reqVO.getIp(), reqVO.getBrightness(), reqVO.getTemp(), reqVO.getAutoMode());
 
+        long stepStartNs = System.nanoTime();
         DeviceDO device = deviceMapper.selectOne(
                 new LambdaQueryWrapper<DeviceDO>()
                         .eq(DeviceDO::getChipId, chipId)
         );
+        logPerf(chipId, "queryDevice", stepStartNs);
 
         if (device == null) {
-            log.warn("设备状态上报被拒绝：设备未注册 chipId={} ip={}", chipId, reqVO.getIp());
-            throw new ServiceException("设备不存在，请先添加设备");
+            log.warn("Device state report rejected: unregistered device, chipId={} ip={}", chipId, reqVO.getIp());
+            throw new ServiceException("Device does not exist, please add it first");
         }
 
-        // 设备上报不修改 storeId 等归属字段，仅更新设备自身状态
+        // Device reports are telemetry; user-managed light settings remain
+        // database-owned and are pushed back to the device on registration.
         if (reqVO.getIp() != null) {
             device.setIp(reqVO.getIp());
         }
         if (reqVO.getDeviceType() != null) {
             device.setDeviceType(reqVO.getDeviceType());
-        }
-        if (reqVO.getBrightness() != null) {
-            device.setBrightness(reqVO.getBrightness());
-        }
-        if (reqVO.getTemp() != null) {
-            device.setTemp(reqVO.getTemp());
-        }
-        if (reqVO.getAutoMode() != null) {
-            device.setAutoMode(reqVO.getAutoMode());
-        }
-        if (reqVO.getRecommendedBrightness() != null) {
-            device.setRecommendedBrightness(reqVO.getRecommendedBrightness());
-        }
-        if (reqVO.getRecommendedTemp() != null) {
-            device.setRecommendedTemp(reqVO.getRecommendedTemp());
-        }
-        if (reqVO.getFabric() != null) {
-            device.setFabric(reqVO.getFabric());
-        }
-        if (reqVO.getMainColorRgb() != null) {
-            device.setMainColorRgb(reqVO.getMainColorRgb());
         }
         if (reqVO.getFirmwareVersion() != null) {
             device.setFirmwareVersion(reqVO.getFirmwareVersion());
@@ -81,6 +71,14 @@ public class DeviceReportServiceImpl implements DeviceReportService {
         if (reqVO.getFirmwareChannel() != null) {
             device.setFirmwareChannel(normalizeChannel(reqVO.getFirmwareChannel()));
         }
+        stepStartNs = System.nanoTime();
+        if (isCompletedSelfTest(reqVO.getSelfTest())) {
+            device.setSelfTestJson(writeSelfTestJson(reqVO.getSelfTest()));
+            device.setSelfTestTime(LocalDateTime.now());
+        }
+        logPerf(chipId, "saveSelfTest", stepStartNs);
+
+        stepStartNs = System.nanoTime();
         String oldOtaStatus = normalizeOtaStatus(device.getOtaStatus());
         String newOtaStatus = oldOtaStatus;
         boolean otaStatusReported = reqVO.getOtaStatus() != null;
@@ -89,16 +87,31 @@ public class DeviceReportServiceImpl implements DeviceReportService {
             device.setOtaStatus(newOtaStatus);
         }
         updateOtaProgress(chipId, oldOtaStatus, newOtaStatus, reqVO.getOtaProgress(), otaStatusReported);
+        logPerf(chipId, "otaProgress", stepStartNs);
 
         device.setUpdateTime(LocalDateTime.now());
+        stepStartNs = System.nanoTime();
         deviceMapper.updateById(device);
+        logPerf(chipId, "updateDevice", stepStartNs);
 
-        // 设备已经走 ws/device 注册过，这里刷新 lastSeen
+        // Refresh lastSeen for devices that have registered through ws/device.
+        stepStartNs = System.nanoTime();
         deviceSessionManager.touch(chipId);
+        LocalDateTime persistedLastSeenAt = deviceLastSeenService.persistIfDue(
+                chipId, deviceSessionManager.getLastSeen(chipId));
+        if (persistedLastSeenAt != null) {
+            device.setLastSeenAt(persistedLastSeenAt);
+        }
+        logPerf(chipId, "lastSeen", stepStartNs);
 
+        stepStartNs = System.nanoTime();
         DeviceRespVO respVO = otaProgressStore.applyProgress(DeviceConvert.convert(device));
-        // 推送给该设备所属店铺的浏览器客户端（storeId 由 DeviceConvert 从 DeviceDO 填充）
+        logPerf(chipId, "convert", stepStartNs);
+
+        stepStartNs = System.nanoTime();
         webSocketPushService.pushState(respVO);
+        logPerf(chipId, "pushWs", stepStartNs);
+        log.debug("[STATE-REPORT-PERF] chipId={} total={}ms", chipId, elapsedMs(totalStartNs));
     }
 
     private void updateOtaProgress(String chipId, String oldStatus, String newStatus, Integer progress, boolean statusReported) {
@@ -145,6 +158,18 @@ public class DeviceReportServiceImpl implements DeviceReportService {
         }
     }
 
+    private boolean isCompletedSelfTest(Map<String, Object> selfTest) {
+        return selfTest != null && Boolean.TRUE.equals(selfTest.get("done"));
+    }
+
+    private String writeSelfTestJson(Map<String, Object> selfTest) {
+        try {
+            return objectMapper.writeValueAsString(selfTest);
+        } catch (JacksonException e) {
+            throw new ServiceException("Invalid selfTest payload");
+        }
+    }
+
     private String normalizeChannel(String channel) {
         String value = channel == null ? "" : channel.trim().toLowerCase(Locale.ROOT);
         return "test".equals(value) ? "test" : "stable";
@@ -156,5 +181,13 @@ public class DeviceReportServiceImpl implements DeviceReportService {
             return value;
         }
         return "idle";
+    }
+
+    private void logPerf(String chipId, String step, long startedNs) {
+        log.debug("[STATE-REPORT-PERF] chipId={} step={} cost={}ms", chipId, step, elapsedMs(startedNs));
+    }
+
+    private long elapsedMs(long startedNs) {
+        return (System.nanoTime() - startedNs) / 1_000_000L;
     }
 }

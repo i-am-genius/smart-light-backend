@@ -4,6 +4,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 
+import java.util.Map;
+
 @Schema(description = "设备状态上报请求。由单片机端调用，用于同步亮度、色温、自动模式、AI 推荐和 OTA 状态")
 @Data
 public class DeviceStateReportReqVO {
@@ -54,6 +56,9 @@ public class DeviceStateReportReqVO {
 
     @Schema(description = "OTA progress, 0-100", example = "35")
     private Integer otaProgress;
+
+    @Schema(description = "Device self-test result JSON")
+    private Map<String, Object> selfTest;
 
     public void setOtaProgress(Object otaProgress) {
         this.otaProgress = parseOtaProgress(otaProgress);

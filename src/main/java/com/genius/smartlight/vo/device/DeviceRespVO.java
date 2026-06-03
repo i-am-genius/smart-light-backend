@@ -29,6 +29,9 @@ public class DeviceRespVO {
     @Schema(description = "设备局域网 IP 地址", example = "192.168.1.10")
     private String ip;
 
+    @Schema(description = "Device last seen time", example = "2026-06-03T10:30:00")
+    private LocalDateTime lastSeenAt;
+
     @Schema(description = "当前亮度，范围 0-100", example = "80")
     private Integer brightness;
 
@@ -64,6 +67,12 @@ public class DeviceRespVO {
 
     @Schema(description = "OTA progress, 0-100", example = "35")
     private Integer otaProgress;
+
+    @Schema(description = "Device latest self-test result JSON")
+    private String selfTestJson;
+
+    @Schema(description = "Device latest self-test time", example = "2026-06-02T10:30:00")
+    private LocalDateTime selfTestTime;
 
     @Schema(description = "创建时间", example = "2026-04-14T10:30:00")
     private LocalDateTime createTime;

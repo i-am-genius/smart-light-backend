@@ -31,6 +31,7 @@ public class DeviceConvert {
         respVO.setDeviceNo(device.getDeviceNo());
         respVO.setDisplayName(device.getDisplayName());
         respVO.setIp(device.getIp());
+        respVO.setLastSeenAt(device.getLastSeenAt());
         respVO.setBrightness(device.getBrightness());
         respVO.setTemp(device.getTemp());
         respVO.setAutoMode(device.getAutoMode());
@@ -42,6 +43,8 @@ public class DeviceConvert {
         respVO.setFirmwareVersionCode(device.getFirmwareVersionCode());
         respVO.setFirmwareChannel(device.getFirmwareChannel());
         respVO.setOtaStatus(device.getOtaStatus());
+        respVO.setSelfTestJson(device.getSelfTestJson());
+        respVO.setSelfTestTime(device.getSelfTestTime());
         respVO.setCreateTime(device.getCreateTime());
         respVO.setUpdateTime(device.getUpdateTime());
         respVO.setStoreId(device.getStoreId());

@@ -54,6 +54,7 @@ public class DeviceOnlineServiceImpl implements DeviceOnlineService {
         respVO.setIp(device.getIp());
         respVO.setOnline(deviceSessionManager.isOnline(device.getChipId()));
         respVO.setLastSeen(deviceSessionManager.getLastSeen(device.getChipId()));
+        respVO.setLastSeenAt(device.getLastSeenAt());
         return respVO;
     }
 }

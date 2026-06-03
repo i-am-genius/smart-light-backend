@@ -22,6 +22,7 @@ public class DeviceOnlinePushService {
     private final DeviceMapper deviceMapper;
     private final DeviceSessionManager deviceSessionManager;
     private final WebSocketPushService webSocketPushService;
+    private final DeviceLastSeenService deviceLastSeenService;
 
     /**
      * 记录上一次已推送的在线状态，避免重复推送
@@ -37,6 +38,11 @@ public class DeviceOnlinePushService {
         Boolean lastPushed = lastPushedStatusMap.get(chipId);
 
         if (lastPushed == null || lastPushed != currentOnline) {
+            if (currentOnline) {
+                deviceLastSeenService.persistIfDue(chipId, deviceSessionManager.getLastSeen(chipId));
+            } else {
+                deviceLastSeenService.persistNow(chipId, deviceSessionManager.getLastSeen(chipId));
+            }
             DeviceDO device = deviceMapper.selectOne(
                     new LambdaQueryWrapper<DeviceDO>()
                             .eq(DeviceDO::getChipId, chipId)
@@ -108,6 +114,7 @@ public class DeviceOnlinePushService {
         respVO.setIp(device != null ? device.getIp() : null);
         respVO.setOnline(deviceSessionManager.isOnline(chipId));
         respVO.setLastSeen(deviceSessionManager.getLastSeen(chipId));
+        respVO.setLastSeenAt(device != null ? device.getLastSeenAt() : null);
         return respVO;
     }
 }

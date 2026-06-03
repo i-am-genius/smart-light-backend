@@ -60,4 +60,10 @@ public class FabricRecognizeRespVO {
 
     @Schema(description = "原图与标注图拼接对比图访问地址")
     private String combinedImageUrl;
+
+    @Schema(description = "远程AI模式：完整标注图 JPG base64，供后端存档。前端不应使用此字段")
+    private String archiveAnnotatedJpgBase64;
+
+    @Schema(description = "远程AI模式：原图+标注拼接 combined JPG base64，供后端存档。前端不应使用此字段")
+    private String archiveCombinedJpgBase64;
 }

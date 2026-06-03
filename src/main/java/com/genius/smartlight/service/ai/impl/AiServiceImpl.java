@@ -25,11 +25,17 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Set;
 
@@ -42,6 +48,11 @@ public class AiServiceImpl implements AiService {
     private static final Set<String> ALLOWED_IMAGE_EXTENSIONS = Set.of(".jpg", ".jpeg", ".png", ".webp");
     private static final Set<String> ALLOWED_IMAGE_MIME_TYPES = Set.of("image/jpeg", "image/png", "image/webp");
     private static final String UNSUPPORTED_IMAGE_MESSAGE = "仅支持 JPG、PNG、WEBP 图片";
+
+    private static final Path FABRIC_UPLOAD_BASE_DIR = Path.of("/opt/smartlight/uploads/fabric");
+    private static final String FABRIC_PUBLIC_BASE_URL = "https://api.genius.show/uploads/fabric";
+    private static final DateTimeFormatter FILE_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private final DeviceMapper deviceMapper;
     private final FabricAiClient fabricAiClient;
@@ -63,14 +74,64 @@ public class AiServiceImpl implements AiService {
             validateFile(file);
             validated = true;
 
+            // 读取文件字节，保存原始图片到 A 服务器，然后用字节包装调用 AI
+            byte[] imageBytes;
+            try {
+                imageBytes = file.getBytes();
+            } catch (IOException e) {
+                throw new ServiceException("读取上传图片失败");
+            }
+            String originalContentType = file.getContentType();
+            String fileBase = buildImageFileBase(chipId);
+            String originalExtension = resolveExtension(file.getOriginalFilename(), originalContentType);
+            String originalFilename = fileBase + "_original" + originalExtension;
+
+            long saveOriginalStart = System.currentTimeMillis();
+            try {
+                ensureFabricUploadDirs();
+                saveImageBytes(imageBytes, "original", originalFilename);
+            } catch (IOException e) {
+                throw new ServiceException("保存原始图片失败");
+            } finally {
+                log.debug("fabricRecognize cost step=saveOriginal chipId={} filename={} fileSize={} costMs={}",
+                        chipId, filename, fileSize, System.currentTimeMillis() - saveOriginalStart);
+            }
+
+            MultipartFile aiFile = wrapBytesAsMultipartFile(imageBytes, file.getOriginalFilename(), originalContentType);
+
             long pythonStart = System.currentTimeMillis();
             FabricRecognizeRespVO result;
             try {
-                result = fabricAiClient.recognize(file, chipId);
+                result = fabricAiClient.recognize(aiFile, chipId);
             } finally {
                 log.debug("fabricRecognize cost step=pythonRecognize chipId={} filename={} fileSize={} costMs={}",
                         chipId, filename, fileSize, System.currentTimeMillis() - pythonStart);
             }
+
+            // 如果 AI 返回存档 base64（远程模式），由 A 后端保存图片
+            String annotatedFilename = fileBase + "_annotated.jpg";
+            String combinedFilename = fileBase + "_combined.jpg";
+            boolean savedLocally = saveArchiveImagesFromBase64(result, annotatedFilename, combinedFilename,
+                    chipId, filename, fileSize);
+
+            // 始终使用 A 后端生成的 original URL
+            result.setOriginalImagePath(FABRIC_UPLOAD_BASE_DIR.resolve("original").resolve(originalFilename)
+                    .toString().replace("\\", "/"));
+            result.setOriginalImageUrl(FABRIC_PUBLIC_BASE_URL + "/original/" + originalFilename);
+
+            // 如果后端成功保存了 annotated/combined，优先使用本地 URL
+            if (savedLocally) {
+                result.setAnnotatedImagePath(FABRIC_UPLOAD_BASE_DIR.resolve("annotated").resolve(annotatedFilename)
+                        .toString().replace("\\", "/"));
+                result.setAnnotatedImageUrl(FABRIC_PUBLIC_BASE_URL + "/annotated/" + annotatedFilename);
+                result.setCombinedImagePath(FABRIC_UPLOAD_BASE_DIR.resolve("combined").resolve(combinedFilename)
+                        .toString().replace("\\", "/"));
+                result.setCombinedImageUrl(FABRIC_PUBLIC_BASE_URL + "/combined/" + combinedFilename);
+            }
+
+            // 清除存档 base64 字段，避免泄漏到前端或数据库
+            result.setArchiveAnnotatedJpgBase64(null);
+            result.setArchiveCombinedJpgBase64(null);
 
             MainColorResult colorResult;
             long mainColorStart = System.currentTimeMillis();
@@ -82,7 +143,7 @@ public class AiServiceImpl implements AiService {
                         colorResult = mainColorService.extract(maskedStream);
                     }
                 } else {
-                    colorResult = mainColorService.extract(file.getInputStream());
+                    colorResult = mainColorService.extract(new ByteArrayInputStream(imageBytes));
                 }
             } catch (Exception e) {
                 log.warn("fabricRecognize main color extract failed chipId={} filename={} fileSize={}",
@@ -410,5 +471,147 @@ public class AiServiceImpl implements AiService {
                 && header[9] == 0x45
                 && header[10] == 0x42
                 && header[11] == 0x50;
+    }
+
+    /**
+     * 生成留档图片的基础文件名：{chipId}_{timestamp}_{random}
+     */
+    private String buildImageFileBase(String chipId) {
+        String safeChipId = chipId != null && !chipId.isBlank()
+                ? chipId.replaceAll("[^A-Za-z0-9_-]", "")
+                : "unknown";
+        String timestamp = LocalDateTime.now().format(FILE_TIMESTAMP_FORMATTER);
+        byte[] randomBytes = new byte[4];
+        SECURE_RANDOM.nextBytes(randomBytes);
+        String randomSuffix = HexFormat.of().formatHex(randomBytes);
+        return safeChipId + "_" + timestamp + "_" + randomSuffix;
+    }
+
+    /**
+     * 确保 fabric 三级存档目录存在
+     */
+    private void ensureFabricUploadDirs() throws IOException {
+        for (String subdir : new String[]{"original", "annotated", "combined"}) {
+            Files.createDirectories(FABRIC_UPLOAD_BASE_DIR.resolve(subdir));
+        }
+    }
+
+    /**
+     * 将字节写入存档子目录
+     */
+    private void saveImageBytes(byte[] bytes, String subdir, String filename) throws IOException {
+        Path targetPath = FABRIC_UPLOAD_BASE_DIR.resolve(subdir).resolve(filename);
+        Files.write(targetPath, bytes);
+        log.debug("fabric archive saved: {}", targetPath);
+    }
+
+    /**
+     * 从 AI 返回的 base64 解码并保存 annotated 和 combined 图片。
+     * 返回 true 表示至少保存了一张图。
+     */
+    private boolean saveArchiveImagesFromBase64(FabricRecognizeRespVO result,
+                                                  String annotatedFilename,
+                                                  String combinedFilename,
+                                                  String chipId, String filename, long fileSize) {
+        boolean saved = false;
+        long start = System.currentTimeMillis();
+        try {
+            String annotatedB64 = result.getArchiveAnnotatedJpgBase64();
+            if (annotatedB64 != null && !annotatedB64.isBlank()) {
+                byte[] decoded = Base64.getDecoder().decode(annotatedB64);
+                saveImageBytes(decoded, "annotated", annotatedFilename);
+                saved = true;
+            }
+        } catch (Exception e) {
+            log.warn("fabricRecognize failed to save annotated archive chipId={} filename={}", chipId, filename, e);
+        } finally {
+            log.debug("fabricRecognize cost step=saveAnnotatedArchive chipId={} filename={} fileSize={} costMs={}",
+                    chipId, filename, fileSize, System.currentTimeMillis() - start);
+        }
+
+        long combinedStart = System.currentTimeMillis();
+        try {
+            String combinedB64 = result.getArchiveCombinedJpgBase64();
+            if (combinedB64 != null && !combinedB64.isBlank()) {
+                byte[] decoded = Base64.getDecoder().decode(combinedB64);
+                saveImageBytes(decoded, "combined", combinedFilename);
+                saved = true;
+            }
+        } catch (Exception e) {
+            log.warn("fabricRecognize failed to save combined archive chipId={} filename={}", chipId, filename, e);
+        } finally {
+            log.debug("fabricRecognize cost step=saveCombinedArchive chipId={} filename={} fileSize={} costMs={}",
+                    chipId, filename, fileSize, System.currentTimeMillis() - combinedStart);
+        }
+
+        return saved;
+    }
+
+    /**
+     * 根据文件名和 MIME 类型推断图片扩展名（含点号）
+     */
+    private String resolveExtension(String filename, String contentType) {
+        if (filename != null && filename.contains(".")) {
+            String ext = filename.substring(filename.lastIndexOf('.')).toLowerCase(Locale.ROOT);
+            if (Set.of(".jpg", ".jpeg", ".png", ".webp").contains(ext)) {
+                return ext;
+            }
+        }
+        if (contentType != null) {
+            return switch (contentType.toLowerCase(Locale.ROOT)) {
+                case "image/jpeg" -> ".jpg";
+                case "image/png" -> ".png";
+                case "image/webp" -> ".webp";
+                default -> ".jpg";
+            };
+        }
+        return ".jpg";
+    }
+
+    /**
+     * 将字节数组包装为 MultipartFile，用于 AI 调用（原始流已被读取）
+     */
+    private static MultipartFile wrapBytesAsMultipartFile(byte[] bytes, String originalFilename, String contentType) {
+        return new MultipartFile() {
+            @Override
+            public String getName() {
+                return "image";
+            }
+
+            @Override
+            public String getOriginalFilename() {
+                return originalFilename != null ? originalFilename : "image.jpg";
+            }
+
+            @Override
+            public String getContentType() {
+                return contentType;
+            }
+
+            @Override
+            public boolean isEmpty() {
+                return bytes.length == 0;
+            }
+
+            @Override
+            public long getSize() {
+                return bytes.length;
+            }
+
+            @Override
+            public byte[] getBytes() {
+                return bytes;
+            }
+
+            @Override
+            public InputStream getInputStream() {
+                return new ByteArrayInputStream(bytes);
+            }
+
+            @Override
+            public void transferTo(File dest) throws IOException {
+                Files.write(dest.toPath(), bytes);
+            }
+        };
     }
 }

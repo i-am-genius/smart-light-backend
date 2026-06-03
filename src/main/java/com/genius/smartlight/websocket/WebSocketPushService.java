@@ -28,12 +28,24 @@ public class WebSocketPushService {
     private final OtaProgressStore otaProgressStore;
 
     public void pushState(DeviceRespVO data) {
+        long startNs = System.nanoTime();
         Long storeId = data.getStoreId();
         if (storeId == null) {
             log.warn("pushState skipped: DeviceRespVO has no storeId, chipId={}", data.getChipId());
+            log.debug("[STATE-REPORT-PERF] chipId={} step=pushWs.skipNoStore cost={}ms",
+                    data.getChipId(), elapsedMs(startNs));
             return;
         }
-        broadcastToStore(storeId, "state", otaProgressStore.applyProgress(data));
+        long stepStartNs = System.nanoTime();
+        DeviceRespVO payload = otaProgressStore.applyProgress(data);
+        log.debug("[STATE-REPORT-PERF] chipId={} step=pushWs.applyProgress cost={}ms",
+                data.getChipId(), elapsedMs(stepStartNs));
+        stepStartNs = System.nanoTime();
+        broadcastToStore(storeId, "state", payload);
+        log.debug("[STATE-REPORT-PERF] chipId={} step=pushWs.broadcast cost={}ms storeId={}",
+                data.getChipId(), elapsedMs(stepStartNs), storeId);
+        log.debug("[STATE-REPORT-PERF] chipId={} step=pushWs.total cost={}ms",
+                data.getChipId(), elapsedMs(startNs));
     }
 
     public void pushStateToDevice(String chipId, DeviceRespVO data) {
@@ -171,8 +183,14 @@ public class WebSocketPushService {
             return;
         }
         try {
+            long serializeStartNs = System.nanoTime();
             String payload = objectMapper.writeValueAsString(WsMessage.of(type, data));
+            log.debug("[WS-PUSH-PERF] type={} storeId={} step=serialize cost={}ms payloadBytes={}",
+                    type, storeId, elapsedMs(serializeStartNs), payload.length());
+            long broadcastStartNs = System.nanoTime();
             sessionManager.broadcastToStore(storeId, payload);
+            log.debug("[WS-PUSH-PERF] type={} storeId={} step=broadcast cost={}ms",
+                    type, storeId, elapsedMs(broadcastStartNs));
         } catch (Exception e) {
             log.error("WebSocket broadcastToStore failed, type={} storeId={}", type, storeId, e);
         }
@@ -183,5 +201,9 @@ public class WebSocketPushService {
             return null;
         }
         return value.length() <= 300 ? value : value.substring(0, 300) + "...";
+    }
+
+    private long elapsedMs(long startedNs) {
+        return (System.nanoTime() - startedNs) / 1_000_000L;
     }
 }

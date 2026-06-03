@@ -61,11 +61,19 @@ public class WebSocketSessionManager {
             removeSessionById(session.getId());
             return;
         }
+        long startNs = System.nanoTime();
         try {
             targetSession.sendMessage(new TextMessage(payload));
+            long costMs = elapsedMs(startNs);
+            if (costMs >= 50) {
+                log.debug("[WS-PUSH-PERF] step=send sessionId={} cost={}ms payloadBytes={}",
+                        session.getId(), costMs, payload != null ? payload.length() : 0);
+            }
         } catch (Exception e) {
             removeSessionById(session.getId());
             closeQuietly(targetSession);
+            log.debug("[WS-PUSH-PERF] step=sendFailed sessionId={} cost={}ms payloadBytes={}",
+                    session.getId(), elapsedMs(startNs), payload != null ? payload.length() : 0);
             log.warn("[ws] event=send_failed, sessionId={}, errorType={}, errorMsg={}, action=removed",
                     session.getId(), e.getClass().getSimpleName(), e.getMessage());
         }
@@ -79,12 +87,17 @@ public class WebSocketSessionManager {
         if (storeId == null) {
             return;
         }
+        long startNs = System.nanoTime();
+        int[] matched = {0};
         sessions.forEach((sessionId, session) -> {
             Long sessionStoreId = sessionStoreMap.get(sessionId);
             if (storeId.equals(sessionStoreId)) {
+                matched[0]++;
                 send(session, payload);
             }
         });
+        log.debug("[WS-PUSH-PERF] step=broadcastToStore storeId={} sessions={} matched={} cost={}ms payloadBytes={}",
+                storeId, sessions.size(), matched[0], elapsedMs(startNs), payload != null ? payload.length() : 0);
     }
 
     /**
@@ -110,5 +123,9 @@ public class WebSocketSessionManager {
             log.debug("[ws] event=close_failed, sessionId={}, errorType={}, errorMsg={}",
                     session.getId(), e.getClass().getSimpleName(), e.getMessage());
         }
+    }
+
+    private long elapsedMs(long startedNs) {
+        return (System.nanoTime() - startedNs) / 1_000_000L;
     }
 }

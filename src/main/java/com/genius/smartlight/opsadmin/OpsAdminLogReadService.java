@@ -42,9 +42,32 @@ public class OpsAdminLogReadService {
         add("backend-error", envOrProp("OPS_LOG_BACKEND_ERROR_PATH", "/opt/smartlight/logs/backend-error.log"));
         add("backend-ws", envOrProp("OPS_LOG_BACKEND_WS_PATH", "/opt/smartlight/logs/backend-ws.log"));
         add("fabric-ai", envOrProp("OPS_LOG_FABRIC_AI_PATH", "/opt/smartlight/logs/fabric-ai.log"));
+        add("fabric-ai-error", envOrProp("OPS_LOG_FABRIC_AI_ERROR_PATH", "/opt/smartlight/logs/fabric-ai-error.log"));
         add("nginx-error", envOrProp("OPS_LOG_NGINX_ERROR_PATH", "/var/log/nginx/error.log"));
         add("nginx-access", envOrProp("OPS_LOG_NGINX_ACCESS_PATH", "/var/log/nginx/access.log"));
+        add("security", resolveSecurityPath());
+        add("mysql-error", resolveMysqlPath());
+        add("backend-service", "/dev/null");  // systemd type — read via journalctl, not file
+        add("fabric-ai-service", "/dev/null"); // systemd type — read via journalctl, not file
         log.info("[ops-admin] Log whitelist configured: {}", logTypeToPath.keySet());
+    }
+
+    private String resolveSecurityPath() {
+        String env = envOrProp("OPS_LOG_SECURITY_PATH", null);
+        if (env != null && !env.isBlank()) return env.trim();
+        if (new java.io.File("/var/log/secure").exists()) return "/var/log/secure";
+        if (new java.io.File("/var/log/auth.log").exists()) return "/var/log/auth.log";
+        return "/var/log/secure"; // default
+    }
+
+    private String resolveMysqlPath() {
+        String env = envOrProp("OPS_LOG_MYSQL_ERROR_PATH", null);
+        if (env != null && !env.isBlank()) return env.trim();
+        if (new java.io.File("/var/log/mysql/mysqld.log").exists()) return "/var/log/mysql/mysqld.log";
+        if (new java.io.File("/var/log/mysqld.log").exists()) return "/var/log/mysqld.log";
+        if (new java.io.File("/var/log/mysql/error.log").exists()) return "/var/log/mysql/error.log";
+        if (new java.io.File("/var/log/mariadb/mariadb.log").exists()) return "/var/log/mariadb/mariadb.log";
+        return "/var/log/mysql/mysqld.log"; // default (most common)
     }
 
     private void add(String type, String path) {

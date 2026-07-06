@@ -144,7 +144,20 @@ public class OpsAdminDeviceLogService {
                     if (kwLower != null && (e.getMsg() == null || !e.getMsg().toLowerCase(Locale.ROOT).contains(kwLower))) continue;
                     DeviceLogQueryEntry qe = new DeviceLogQueryEntry();
                     qe.setChipId(pw.chip);
-                    qe.setTimestamp(e.getTimestamp());
+
+                    // 修复：timestamp 必须来自 ts 字段，不是 uptimeMs
+                    Long ts = e.getTs();
+                    if (ts == null || ts < 946684800000L) {
+                        // 旧错误日志无法恢复真实时间，使用文件修改时间
+                        try {
+                            ts = Files.getLastModifiedTime(pw.path).toMillis();
+                        } catch (IOException ex) {
+                            ts = null;
+                        }
+                    }
+                    qe.setTimestamp(ts == null ? null : String.valueOf(ts));
+                    qe.setUptimeMs(e.getUptimeMs());  // 保留 uptimeMs 字段
+
                     qe.setLevel(e.getLevel());
                     qe.setModule(e.getModule());
                     qe.setMessage(e.getMsg());

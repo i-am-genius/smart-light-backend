@@ -37,10 +37,6 @@ public class SecurityConfig {
                                 "/api/auth/login",
                                 "/api/auth/register",
                                 "/ops-admin/auth/login",
-                                "/v3/api-docs",
-                                "/v3/api-docs/**",
-                                "/swagger-ui/**",
-                                "/swagger-ui.html",
                                 "/admin/device/ping"
                         ).permitAll()
 
@@ -53,9 +49,16 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST,
                                 "/admin/device/announce",
                                 "/admin/device/state-report",
+                                "/admin/device/logs/batch",
                                 "/admin/lux/create",
                                 "/admin/duration/create"
                         ).permitAll()
+
+                        // 设备日志查询接口：需要认证（前端通过 /ops-admin/ 路径访问）
+                        // .requestMatchers(HttpMethod.GET,
+                        //         "/admin/device/logs/query",
+                        //         "/admin/device/logs/devices"
+                        // ).permitAll()
 
                         // OTA 如果后面要用，也先放行
                         .requestMatchers(
@@ -63,6 +66,12 @@ public class SecurityConfig {
                         ).permitAll()
 
                         // 浏览器端 websocket：继续走 JWT
+                        // Device capture uploads use a one-time task token validated by DeviceCamService.
+                        .requestMatchers(HttpMethod.POST,
+                                "/device/cam/capture-task/*/photo",
+                                "/device/cam/flow-photo"
+                        ).permitAll()
+
                         .requestMatchers("/ws", "/ws/**").authenticated()
 
                         // 其余全部要求用户登录

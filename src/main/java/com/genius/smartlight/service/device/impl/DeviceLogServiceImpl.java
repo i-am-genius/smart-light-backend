@@ -71,7 +71,7 @@ public class DeviceLogServiceImpl implements DeviceLogService {
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneId.systemDefault());
 
     @Override
-    public String writeLogs(String chipId, List<DeviceLogEntryDTO> entries) {
+    public String writeLogs(String chipId, long uploadUptimeMs, List<DeviceLogEntryDTO> entries) {
         // 校验 chipId 不能为空且不能包含路径分隔符
         if (chipId == null || chipId.isBlank()) {
             throw new ServiceException("chipId 不能为空");
@@ -110,8 +110,31 @@ public class DeviceLogServiceImpl implements DeviceLogService {
         for (DeviceLogEntryDTO entry : entries) {
             try {
                 // 补充真实时间戳 ts
+                // 使用 uploadUptimeMs 和 entry.uptimeMs 回推每条日志的产生时间
+                Long entryUptimeMs = entry.getUptimeMs();
                 if (entry.getTs() == null || entry.getTs() < 946684800000L) {
-                    entry.setTs(serverNow);
+                    // 异常保护：uptimeMs 为空，用 serverNow
+                    if (entryUptimeMs == null) {
+                        entry.setTs(serverNow);
+                    }
+                    // 异常保护：uploadUptimeMs <= 0，用 serverNow
+                    else if (uploadUptimeMs <= 0) {
+                        entry.setTs(serverNow);
+                    }
+                    // 异常保护：entry.uptimeMs > uploadUptimeMs，用 serverNow
+                    else if (entryUptimeMs > uploadUptimeMs) {
+                        entry.setTs(serverNow);
+                    }
+                    // 正常情况：回推每条日志的产生时间
+                    else {
+                        long delta = uploadUptimeMs - entryUptimeMs;
+                        // 异常保护：delta 超过 24 小时，用 serverNow
+                        if (delta > 24 * 60 * 60 * 1000) {
+                            entry.setTs(serverNow);
+                        } else {
+                            entry.setTs(serverNow - delta);
+                        }
+                    }
                 }
                 sb.append(objectMapper.writeValueAsString(entry)).append('\n');
             } catch (JacksonException e) {

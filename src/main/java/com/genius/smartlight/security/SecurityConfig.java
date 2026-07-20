@@ -18,6 +18,7 @@ public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
     private final com.genius.smartlight.opsadmin.OpsAdminAuthFilter opsAdminAuthFilter;
+    private final JsonAuthenticationEntryPoint jsonAuthenticationEntryPoint;
 
     @Bean
     public PasswordEncoder passwordEncoder() {
@@ -29,6 +30,9 @@ public class SecurityConfig {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(Customizer.withDefaults())
+                .exceptionHandling(exceptions -> exceptions
+                        .authenticationEntryPoint(jsonAuthenticationEntryPoint)
+                )
                 .authorizeHttpRequests(auth -> auth
                         // CORS 预检请求放行
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()

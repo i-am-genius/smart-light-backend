@@ -33,6 +33,7 @@ build/
 .vscode/
 
 ### Project-specific ###
+.worktrees/
 src/main/resources/application.yaml
 src/main/resources/application-example.yaml
 data/

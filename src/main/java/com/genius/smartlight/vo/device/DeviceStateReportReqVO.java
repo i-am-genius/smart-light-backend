@@ -14,7 +14,7 @@ public class DeviceStateReportReqVO {
     @NotBlank(message = "芯片ID不能为空")
     private String chipId;
 
-    @Schema(description = "设备类型：lamp 或 camlamp", example = "lamp", allowableValues = {"lamp", "camlamp"}, requiredMode = Schema.RequiredMode.REQUIRED)
+    @Schema(description = "设备类型：lamp、cam 或 camlamp", example = "lamp", allowableValues = {"lamp", "cam", "camlamp"}, requiredMode = Schema.RequiredMode.REQUIRED)
     @NotBlank(message = "设备类型不能为空")
     private String deviceType;
 
@@ -60,11 +60,69 @@ public class DeviceStateReportReqVO {
     @Schema(description = "Device self-test result JSON")
     private Map<String, Object> selfTest;
 
-    public void setOtaProgress(Object otaProgress) {
-        this.otaProgress = parseOtaProgress(otaProgress);
+    public void setId(String id) {
+        setChipIdIfBlank(id);
     }
 
-    private Integer parseOtaProgress(Object value) {
+    public void setDeviceId(String deviceId) {
+        setChipIdIfBlank(deviceId);
+    }
+
+    public void setAuto(Object auto) {
+        if (this.autoMode == null) {
+            this.autoMode = parseBoolean(auto);
+        }
+    }
+
+    public void setFwVersion(String fwVersion) {
+        if (this.firmwareVersion == null) {
+            this.firmwareVersion = fwVersion;
+        }
+    }
+
+    public void setFwVersionCode(Object fwVersionCode) {
+        if (this.firmwareVersionCode == null) {
+            this.firmwareVersionCode = parseInteger(fwVersionCode);
+        }
+    }
+
+    public void setChannel(String channel) {
+        if (this.firmwareChannel == null) {
+            this.firmwareChannel = channel;
+        }
+    }
+
+    public void setOtaProgress(Object otaProgress) {
+        this.otaProgress = parseInteger(otaProgress);
+    }
+
+    private void setChipIdIfBlank(String value) {
+        if ((this.chipId == null || this.chipId.isBlank()) && value != null && !value.isBlank()) {
+            this.chipId = value;
+        }
+    }
+
+    private Boolean parseBoolean(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty() || "null".equalsIgnoreCase(text)) {
+            return null;
+        }
+        if ("1".equals(text)) {
+            return true;
+        }
+        if ("0".equals(text)) {
+            return false;
+        }
+        return Boolean.parseBoolean(text);
+    }
+
+    private Integer parseInteger(Object value) {
         if (value == null) {
             return null;
         }

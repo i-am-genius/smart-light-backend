@@ -11,10 +11,23 @@ import java.util.List;
 @Configuration
 public class CorsConfig {
 
+    private static final List<String> ALLOWED_ORIGIN_PATTERNS = List.of(
+            "https://archive.genius.show",
+            "https://genius.show",
+            "http://localhost",
+            "https://localhost",
+            "capacitor://localhost",
+            "ionic://localhost",
+            "http://localhost:*",
+            "https://localhost:*",
+            "http://127.0.0.1:*",
+            "https://127.0.0.1:*"
+    );
+
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration webSocketConfig = new CorsConfiguration();
-        webSocketConfig.setAllowedOriginPatterns(List.of("*"));
+        webSocketConfig.setAllowedOriginPatterns(ALLOWED_ORIGIN_PATTERNS);
         webSocketConfig.setAllowedMethods(List.of("GET", "OPTIONS"));
         webSocketConfig.setAllowedHeaders(List.of("*"));
         webSocketConfig.setAllowCredentials(true);
@@ -22,19 +35,7 @@ public class CorsConfig {
 
         CorsConfiguration config = new CorsConfiguration();
 
-        config.setAllowedOriginPatterns(List.of(
-                "https://archive.genius.show",
-                "https://genius.show",
-                "http://localhost:5173",
-                "http://localhost",
-                "https://localhost",
-                "capacitor://localhost",
-                "ionic://localhost",
-                "http://localhost:*",
-                "https://localhost:*",
-                "http://127.0.0.1:*",
-                "https://127.0.0.1:*"
-        ));
+        config.setAllowedOriginPatterns(ALLOWED_ORIGIN_PATTERNS);
 
         config.setAllowedMethods(List.of(
                 "GET", "POST", "PUT", "DELETE", "OPTIONS"

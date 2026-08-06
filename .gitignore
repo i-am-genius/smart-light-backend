@@ -53,3 +53,5 @@ src/main/resources/application.yml
 
 CLAUDE.md
 .claude/settings.local.json
+.superpowers/
+docs/

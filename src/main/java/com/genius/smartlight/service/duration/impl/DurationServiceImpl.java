@@ -68,6 +68,8 @@ public class DurationServiceImpl implements DurationService {
         DurationRecordDO latest = durationRecordMapper.selectOne(
                 new LambdaQueryWrapper<DurationRecordDO>()
                         .eq(DurationRecordDO::getChipId, reqVO.getChipId())
+                        .eq(DurationRecordDO::getDeviceId, device.getId())
+                        .eq(DurationRecordDO::getStoreId, device.getStoreId())
                         .eq(DurationRecordDO::getStatDate, reqVO.getStatDate())
                         .last("limit 1")
         );

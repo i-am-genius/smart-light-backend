@@ -70,13 +70,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             if (protocolToken != null) {
                 return protocolToken;
             }
-
-            String queryToken = request.getParameter("token");
-            if (queryToken != null && !queryToken.isBlank()) {
-                log.warn("WebSocket token from query parameter is deprecated, {}",
-                        RequestLogUtils.logContext(request));
-                return queryToken;
-            }
         }
 
         return null;

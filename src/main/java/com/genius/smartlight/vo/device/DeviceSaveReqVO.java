@@ -14,7 +14,7 @@ public class DeviceSaveReqVO {
     @NotBlank(message = "芯片ID不能为空")
     private String chipId;
 
-    @Schema(description = "设备类型。lamp 表示普通灯控设备，camlamp 表示带摄像头/云台的灯控设备", example = "lamp", allowableValues = {"lamp", "camlamp"}, requiredMode = Schema.RequiredMode.REQUIRED)
+    @Schema(description = "设备类型。lamp 表示普通灯控设备，cam 表示独立摄像头云台设备，camlamp 表示带摄像头/云台的灯控设备", example = "lamp", allowableValues = {"lamp", "cam", "camlamp"}, requiredMode = Schema.RequiredMode.REQUIRED)
     @NotBlank(message = "设备类型不能为空")
     private String deviceType;
 

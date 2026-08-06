@@ -1,9 +1,11 @@
 package com.genius.smartlight.vo.device;
 
+import com.genius.smartlight.vo.ai.GarmentPartRespVO;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Schema(description = "设备信息响应。包含设备基础信息、当前灯光状态、AI 推荐结果和 OTA 状态")
 @Data
@@ -17,7 +19,7 @@ public class DeviceRespVO {
     @Schema(description = "芯片唯一ID，设备控制和状态同步的匹配主键", example = "ABC123456")
     private String chipId;
 
-    @Schema(description = "设备类型：lamp 普通灯控设备，camlamp 带摄像头/云台设备", example = "lamp", allowableValues = {"lamp", "camlamp"})
+    @Schema(description = "设备类型：lamp 普通灯控设备，cam 独立摄像头云台设备，camlamp 带摄像头/云台的灯控设备", example = "lamp", allowableValues = {"lamp", "cam", "camlamp"})
     private String deviceType;
 
     @Schema(description = "店内编号", example = "1")
@@ -52,6 +54,16 @@ public class DeviceRespVO {
 
     @Schema(description = "AI 识别出的服装主色 RGB 值，格式为 R,G,B", example = "255,200,120")
     private String mainColorRgb;
+
+    private Integer resultVersion;
+
+    private Boolean clothDetected;
+
+    private Boolean segmentationFallback;
+
+    private String outfitType;
+
+    private List<GarmentPartRespVO> garments;
 
     @Schema(description = "当前固件版本号", example = "1.0.0")
     private String firmwareVersion;

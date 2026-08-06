@@ -1,6 +1,7 @@
 package com.genius.smartlight.convert.device;
 
 import com.genius.smartlight.dal.dataobject.DeviceDO;
+import com.genius.smartlight.service.ai.GarmentResultCodec;
 import com.genius.smartlight.vo.device.DeviceRespVO;
 import com.genius.smartlight.vo.device.DeviceSaveReqVO;
 
@@ -48,6 +49,7 @@ public class DeviceConvert {
         respVO.setCreateTime(device.getCreateTime());
         respVO.setUpdateTime(device.getUpdateTime());
         respVO.setStoreId(device.getStoreId());
+        GarmentResultCodec.applyToResponse(device, respVO);
         return respVO;
     }
 }

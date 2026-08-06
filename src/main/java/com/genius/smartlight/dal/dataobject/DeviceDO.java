@@ -54,6 +54,9 @@ public class DeviceDO {
     @TableField("main_color_rgb")
     private String mainColorRgb;
 
+    @TableField("garment_result_json")
+    private String garmentResultJson;
+
     @TableField("firmware_version")
     private String firmwareVersion;
 

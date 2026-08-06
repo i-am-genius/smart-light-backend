@@ -29,20 +29,29 @@ public class OpsAdminSystemStatusService {
 
     private final RestTemplate aiRestTemplate;
     private final RestTemplate healthCheckRestTemplate;
-    private final String aiHealthUrl;
+    private final String fabricHealthUrl;
+    private final String flowHealthUrl;
     private final String nginxHealthUrl;
+    private final String serverManagerHealthUrl;
+    private final String aiFabricUrl;
     private final String aiFlowUrl;
 
     public OpsAdminSystemStatusService(
             @Qualifier("aiRestTemplate") RestTemplate aiRestTemplate,
             @Qualifier("healthCheckRestTemplate") RestTemplate healthCheckRestTemplate,
-            @Value("${ops.status.ai-health-url:}") String aiHealthUrl,
+            @Value("${ops.status.fabric-health-url:${ops.status.ai-health-url:}}") String fabricHealthUrl,
+            @Value("${ops.status.flow-health-url:}") String flowHealthUrl,
             @Value("${ops.status.nginx-health-url:}") String nginxHealthUrl,
+            @Value("${ops.status.server-manager-health-url:http://127.0.0.1:9080/actuator/health}") String serverManagerHealthUrl,
+            @Value("${ai.fabric.url:}") String aiFabricUrl,
             @Value("${ai.flow.url:}") String aiFlowUrl) {
         this.aiRestTemplate = aiRestTemplate;
         this.healthCheckRestTemplate = healthCheckRestTemplate;
-        this.aiHealthUrl = aiHealthUrl;
+        this.fabricHealthUrl = fabricHealthUrl;
+        this.flowHealthUrl = flowHealthUrl;
         this.nginxHealthUrl = nginxHealthUrl;
+        this.serverManagerHealthUrl = serverManagerHealthUrl;
+        this.aiFabricUrl = aiFabricUrl;
         this.aiFlowUrl = aiFlowUrl;
     }
 
@@ -311,6 +320,7 @@ public class OpsAdminSystemStatusService {
                 }
 
                 // Read /proc/[pid]/cmdline
+                String rawCmd = name;
                 File cmdlineFile = new File(pidDir, "cmdline");
                 if (cmdlineFile.exists()) {
                     byte[] bytes = java.nio.file.Files.readAllBytes(cmdlineFile.toPath());
@@ -322,7 +332,7 @@ public class OpsAdminSystemStatusService {
                             cmdBuilder.append((char) b);
                         }
                     }
-                    String rawCmd = cmdBuilder.toString().trim();
+                    rawCmd = cmdBuilder.toString().trim();
                     String sanitized = sanitizeCommand(rawCmd);
                     if (sanitized.length() > 160) {
                         sanitized = sanitized.substring(0, 160) + "...";
@@ -331,6 +341,12 @@ public class OpsAdminSystemStatusService {
                 } else {
                     entry.put("command", name);
                 }
+
+                ProcessClassification classification =
+                        classifyProcess(name, rawCmd, pid == currentPid);
+                entry.put("displayName", classification.displayName());
+                entry.put("typeKey", classification.typeKey());
+                entry.put("typeLabel", classification.typeLabel());
 
                 procList.add(entry);
             } catch (Exception e) {
@@ -349,6 +365,77 @@ public class OpsAdminSystemStatusService {
 
         result.put("topMemory", topMemory);
         return result;
+    }
+
+    static ProcessClassification classifyProcess(
+            String processName,
+            String command,
+            boolean currentBackend
+    ) {
+        String name = processName == null ? "" : processName.trim();
+        String normalizedName = name.toLowerCase(Locale.ROOT);
+        String normalizedCommand = command == null ? "" : command.toLowerCase(Locale.ROOT);
+
+        if (currentBackend) {
+            return new ProcessClassification("Backend API", "backend", "后端服务");
+        }
+        if (containsAny(normalizedCommand,
+                "fabric_wsgi:app",
+                "vit_api.py",
+                "vit_api",
+                "smartlight-fabric-ai",
+                "--bind 127.0.0.1:5011")) {
+            return new ProcessClassification("Fabric AI", "ai", "AI 服务");
+        }
+        if (containsAny(normalizedCommand,
+                "flow_wsgi:app",
+                "flow.py",
+                "smartlight-flow-ai",
+                "--bind 127.0.0.1:5000")) {
+            return new ProcessClassification("People Flow AI", "ai", "AI 服务");
+        }
+        if (normalizedCommand.contains("server-manager.jar")) {
+            return new ProcessClassification(
+                    "Server Manager Backend",
+                    "manager",
+                    "运维管理服务"
+            );
+        }
+        if (normalizedCommand.contains("app.jar")) {
+            return new ProcessClassification("Backend API", "backend", "后端服务");
+        }
+        if (normalizedName.contains("mysqld") || normalizedName.contains("mysql")) {
+            return new ProcessClassification("MySQL", "db", "MySQL");
+        }
+        if (normalizedName.contains("nginx")) {
+            return new ProcessClassification("Nginx", "web", "Nginx");
+        }
+        if (normalizedName.contains("gunicorn")
+                || normalizedName.contains("python")
+                || normalizedCommand.contains("python")) {
+            return new ProcessClassification(
+                    name.isBlank() ? "Python Service" : name,
+                    "ai",
+                    "AI 服务"
+            );
+        }
+        return new ProcessClassification(
+                name.isBlank() ? "unknown" : name,
+                "system",
+                "系统进程"
+        );
+    }
+
+    private static boolean containsAny(String value, String... candidates) {
+        for (String candidate : candidates) {
+            if (value.contains(candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    record ProcessClassification(String displayName, String typeKey, String typeLabel) {
     }
 
     private String sanitizeCommand(String raw) {
@@ -436,6 +523,12 @@ public class OpsAdminSystemStatusService {
         // Fabric AI Service
         list.add(checkFabricAi(now));
 
+        // People Flow AI Service
+        list.add(checkFlowAi(now));
+
+        // Server Manager full chain: Nginx :9080 -> Java backend :9090
+        list.add(checkServerManager(now));
+
         // Nginx
         list.add(checkNginx(now));
 
@@ -443,100 +536,128 @@ public class OpsAdminSystemStatusService {
     }
 
     private Map<String, Object> checkFabricAi(String now) {
-        Map<String, Object> ai = new LinkedHashMap<>();
-        ai.put("name", "Fabric AI Service");
-        ai.put("key", "fabric-ai");
-        ai.put("checkType", "http");
-        ai.put("lastChecked", now);
+        return checkHttpService(
+                "Fabric AI Service",
+                "fabric-ai",
+                resolveHealthUrl(fabricHealthUrl, aiFabricUrl),
+                now,
+                HttpMethod.GET,
+                false
+        );
+    }
 
-        String effectiveUrl = aiHealthUrl;
-        if (effectiveUrl == null || effectiveUrl.isBlank()) {
-            if (aiFlowUrl != null && !aiFlowUrl.isBlank()) {
-                int lastSlash = aiFlowUrl.lastIndexOf('/');
-                effectiveUrl = (lastSlash > 0 ? aiFlowUrl.substring(0, lastSlash) : aiFlowUrl) + "/health";
-            }
-        }
+    private Map<String, Object> checkFlowAi(String now) {
+        return checkHttpService(
+                "People Flow AI Service",
+                "flow-ai",
+                resolveHealthUrl(flowHealthUrl, aiFlowUrl),
+                now,
+                HttpMethod.GET,
+                false
+        );
+    }
 
-        ai.put("checkTarget", effectiveUrl != null ? effectiveUrl : "not configured");
-
-        if (effectiveUrl == null || effectiveUrl.isBlank()) {
-            ai.put("status", "UNKNOWN");
-            ai.put("detail", "health endpoint not configured");
-            return ai;
-        }
-
-        long start = System.currentTimeMillis();
-        try {
-            ResponseEntity<String> resp = healthCheckRestTemplate.exchange(
-                    effectiveUrl, HttpMethod.GET, null, String.class);
-            long elapsed = System.currentTimeMillis() - start;
-            ai.put("responseTimeMs", elapsed);
-            ai.put("httpStatus", resp.getStatusCode().value());
-            if (resp.getStatusCode().is2xxSuccessful()) {
-                ai.put("status", "UP");
-                ai.put("detail", "health check ok");
-            } else {
-                ai.put("status", "DOWN");
-                ai.put("detail", "returned " + resp.getStatusCode().value());
-            }
-        } catch (Exception e) {
-            long elapsed = System.currentTimeMillis() - start;
-            ai.put("responseTimeMs", elapsed);
-            ai.put("status", "DOWN");
-            String msg = e.getMessage();
-            if (msg != null && (msg.contains("timeout") || msg.contains("Timeout"))) {
-                ai.put("detail", "connect timeout");
-            } else if (msg != null && msg.contains("Connection refused")) {
-                ai.put("detail", "connection refused");
-            } else {
-                ai.put("detail", "health check failed");
-            }
-        }
-        return ai;
+    private Map<String, Object> checkServerManager(String now) {
+        return checkHttpService(
+                "Server Manager (9080 → 9090)",
+                "server-manager",
+                serverManagerHealthUrl,
+                now,
+                HttpMethod.GET,
+                false
+        );
     }
 
     private Map<String, Object> checkNginx(String now) {
-        Map<String, Object> nginx = new LinkedHashMap<>();
-        nginx.put("name", "Nginx");
-        nginx.put("key", "nginx");
-        nginx.put("checkType", "http");
-        nginx.put("lastChecked", now);
-
         String effectiveUrl = nginxHealthUrl;
         if (effectiveUrl == null || effectiveUrl.isBlank()) {
             effectiveUrl = "https://archive.genius.show/";
         }
-        nginx.put("checkTarget", effectiveUrl);
+        return checkHttpService(
+                "Nginx",
+                "nginx",
+                effectiveUrl,
+                now,
+                HttpMethod.HEAD,
+                true
+        );
+    }
+
+    private String resolveHealthUrl(String configuredUrl, String serviceUrl) {
+        if (configuredUrl != null && !configuredUrl.isBlank()) {
+            return configuredUrl.trim();
+        }
+        if (serviceUrl == null || serviceUrl.isBlank()) {
+            return "";
+        }
+        String normalized = serviceUrl.trim();
+        int queryIndex = normalized.indexOf('?');
+        if (queryIndex >= 0) {
+            normalized = normalized.substring(0, queryIndex);
+        }
+        int schemeIndex = normalized.indexOf("://");
+        int pathIndex = normalized.indexOf('/', schemeIndex >= 0 ? schemeIndex + 3 : 0);
+        String baseUrl = pathIndex >= 0 ? normalized.substring(0, pathIndex) : normalized;
+        return baseUrl + "/health";
+    }
+
+    private Map<String, Object> checkHttpService(
+            String name,
+            String key,
+            String effectiveUrl,
+            String now,
+            HttpMethod method,
+            boolean acceptClientErrors
+    ) {
+        Map<String, Object> service = new LinkedHashMap<>();
+        service.put("name", name);
+        service.put("key", key);
+        service.put("checkType", "http");
+        service.put("lastChecked", now);
+        service.put(
+                "checkTarget",
+                effectiveUrl != null && !effectiveUrl.isBlank()
+                        ? effectiveUrl
+                        : "not configured"
+        );
+
+        if (effectiveUrl == null || effectiveUrl.isBlank()) {
+            service.put("status", "UNKNOWN");
+            service.put("detail", "health endpoint not configured");
+            return service;
+        }
 
         long start = System.currentTimeMillis();
         try {
             ResponseEntity<String> resp = healthCheckRestTemplate.exchange(
-                    effectiveUrl, HttpMethod.HEAD, null, String.class);
+                    effectiveUrl, method, null, String.class);
             long elapsed = System.currentTimeMillis() - start;
             int code = resp.getStatusCode().value();
-            nginx.put("responseTimeMs", elapsed);
-            nginx.put("httpStatus", code);
-            if (code < 500) {
-                nginx.put("status", "UP");
-                nginx.put("detail", effectiveUrl + " returned " + code);
+            service.put("responseTimeMs", elapsed);
+            service.put("httpStatus", code);
+            boolean successful = resp.getStatusCode().is2xxSuccessful()
+                    || (acceptClientErrors && code < 500);
+            if (successful) {
+                service.put("status", "UP");
+                service.put("detail", "health check ok");
             } else {
-                nginx.put("status", "DOWN");
-                nginx.put("detail", effectiveUrl + " returned " + code);
+                service.put("status", "DOWN");
+                service.put("detail", "returned " + code);
             }
         } catch (Exception e) {
             long elapsed = System.currentTimeMillis() - start;
-            nginx.put("responseTimeMs", elapsed);
-            nginx.put("status", "DOWN");
+            service.put("responseTimeMs", elapsed);
+            service.put("status", "DOWN");
             String msg = e.getMessage();
             if (msg != null && (msg.contains("timeout") || msg.contains("Timeout"))) {
-                nginx.put("detail", "connect timeout");
+                service.put("detail", "connect timeout");
             } else if (msg != null && msg.contains("Connection refused")) {
-                nginx.put("detail", "connection refused");
+                service.put("detail", "connection refused");
             } else {
-                nginx.put("detail", "unreachable");
+                service.put("detail", "health check failed");
             }
         }
-        return nginx;
+        return service;
     }
 
     private Map<String, Object> collectSummary(List<Map<String, Object>> services) {

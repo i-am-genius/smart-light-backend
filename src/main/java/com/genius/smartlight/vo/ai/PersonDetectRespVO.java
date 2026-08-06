@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
+import java.util.List;
+
 @Schema(description = "人流检测响应。包含人数、置信度、处理耗时和标注图 Base64")
 @Data
 public class PersonDetectRespVO {
@@ -20,6 +22,14 @@ public class PersonDetectRespVO {
     @Schema(description = "AI 服务处理耗时，单位秒", example = "0.15")
     @JsonProperty("processing_time")
     private Double processingTime;
+
+    @JsonProperty("image_width")
+    private Integer imageWidth;
+
+    @JsonProperty("image_height")
+    private Integer imageHeight;
+
+    private List<PersonDetectionRespVO> detections;
 
     @Schema(description = "标注后图片的 Base64 编码。前端可兼容带 data:image 前缀或纯 Base64 内容", example = "iVBORw0KGgoAAAANSUhEUg...")
     @JsonProperty("annotated_image_base64")

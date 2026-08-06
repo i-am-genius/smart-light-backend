@@ -3,6 +3,8 @@ package com.genius.smartlight.vo.ai;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
+import java.util.List;
+
 @Schema(description = "服装面料识别响应。包含识别标签、置信度、主色 RGB、推荐灯光参数、预览 Base64 和留档图片路径")
 @Data
 public class FabricRecognizeRespVO {
@@ -66,4 +68,12 @@ public class FabricRecognizeRespVO {
 
     @Schema(description = "远程AI模式：原图+标注拼接 combined JPG base64，供后端存档。前端不应使用此字段")
     private String archiveCombinedJpgBase64;
+
+    private Integer resultVersion;
+
+    private Boolean segmentationFallback;
+
+    private String outfitType;
+
+    private List<GarmentPartRespVO> garments;
 }

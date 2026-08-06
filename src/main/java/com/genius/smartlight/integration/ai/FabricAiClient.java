@@ -26,11 +26,19 @@ public class FabricAiClient {
     @Value("${ai.fabric.url}")
     private String fabricUrl;
 
-    public FabricAiClient(@Qualifier("aiRestTemplate") RestTemplate restTemplate) {
+    public FabricAiClient(@Qualifier("fabricAiRestTemplate") RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
 
     public FabricRecognizeRespVO recognize(MultipartFile file, String chipId) {
+        return recognize(file, chipId, null, false);
+    }
+
+    public FabricRecognizeRespVO recognize(
+            MultipartFile file,
+            String chipId,
+            String archiveId,
+            boolean includePreview) {
         try {
             InputStreamResource resource = new InputStreamResource(file.getInputStream()) {
                 @Override
@@ -49,6 +57,10 @@ public class FabricAiClient {
             if (chipId != null && !chipId.isBlank()) {
                 body.add("chipId", chipId);
             }
+            if (archiveId != null && !archiveId.isBlank()) {
+                body.add("archiveId", archiveId);
+            }
+            body.add("includePreview", Boolean.toString(includePreview));
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.MULTIPART_FORM_DATA);
@@ -67,9 +79,14 @@ public class FabricAiClient {
             }
             return response.getBody();
         } catch (HttpStatusCodeException e) {
+            if (e.getStatusCode().value() == 503) {
+                throw new ServiceException("面料识别服务繁忙，请稍后重试");
+            }
             throw new ServiceException("面料识别服务请求失败：" + e.getStatusCode());
         } catch (ResourceAccessException e) {
             throw new ServiceException("面料识别服务连接超时或不可用，请稍后重试");
+        } catch (ServiceException e) {
+            throw e;
         } catch (Exception e) {
             throw new ServiceException("调用面料识别服务失败：" + e.getMessage());
         }

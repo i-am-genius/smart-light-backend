@@ -2,13 +2,22 @@ package com.genius.smartlight.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
+import com.genius.smartlight.service.device.DeviceCamService;
 import com.genius.smartlight.service.device.DeviceLastSeenService;
 import com.genius.smartlight.service.device.DeviceOnlinePushService;
 import com.genius.smartlight.service.device.OtaProgressStore;
+import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
+import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
+import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
+import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
+import com.genius.smartlight.vo.device.DeviceRespVO;
+import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -17,7 +26,10 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.time.LocalDateTime;
 
 @Slf4j
 @Component
@@ -31,6 +43,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
     private final WebSocketPushService webSocketPushService;
     private final OtaProgressStore otaProgressStore;
     private final DeviceLastSeenService deviceLastSeenService;
+    private final DeviceCamService deviceCamService;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
@@ -43,12 +56,18 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
         try {
             JsonNode node = objectMapper.readTree(message.getPayload());
             String type = node.path("type").asText();
-            String chipId = node.path("chipId").asText();
+            String chipId = readChipId(node);
 
             if ("register".equals(type)) {
-                chipId = deviceSessionManager.normalizeChipId(chipId);
                 if (chipId == null) {
                     log.warn("Device register missing chipId, sessionId={}", session.getId());
+                    return;
+                }
+                DeviceDO knownDevice = findDevice(chipId);
+                if (knownDevice == null) {
+                    log.warn("Device register rejected: unknown chipId={}, sessionId={}, clientIp={}",
+                            chipId, session.getId(), getRemoteAddr(session));
+                    session.close(CloseStatus.POLICY_VIOLATION.withReason("unknown chipId"));
                     return;
                 }
                 boolean wasOnline = deviceSessionManager.isOnline(chipId);
@@ -64,7 +83,13 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 syncFirmwareInfo(chipId, node);
                 pushSavedStateToDevice(chipId);
                 deviceOnlinePushService.pushIfChanged(chipId);
-                session.sendMessage(new TextMessage("{\"type\":\"registerAck\",\"data\":\"ok\"}"));
+                String uploadToken = deviceSessionManager.refreshUploadToken(chipId);
+                ObjectNode ack = objectMapper.createObjectNode();
+                ack.put("type", "registerAck");
+                ack.put("data", "ok");
+                ack.put("deviceUploadToken", uploadToken);
+                session.sendMessage(new TextMessage(objectMapper.writeValueAsString(ack)));
+                pushCamRoiConfigIfNeeded(session, knownDevice);
                 return;
             }
 
@@ -79,11 +104,170 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 return;
             }
 
+            if ("lampClothState".equals(type)) {
+                chipId = requireChipId(chipId, session, "lampClothState");
+                if (chipId == null) return;
+                DeviceLampClothStateReqVO reqVO = new DeviceLampClothStateReqVO();
+                reqVO.setChipId(chipId);
+                reqVO.setClothState(node.path("clothState").asText("unknown"));
+                if (node.hasNonNull("lastTakenAt")) {
+                    reqVO.setLastTakenAt(node.path("lastTakenAt").asText());
+                }
+                if (node.hasNonNull("tracking")) {
+                    reqVO.setTracking(node.path("tracking").asBoolean());
+                }
+                deviceCamService.reportLampClothState(reqVO);
+                return;
+            }
+
+            if ("camStatus".equals(type)) {
+                chipId = requireChipId(chipId, session, "camStatus");
+                if (chipId == null) return;
+                DeviceCamStatusReqVO reqVO = new DeviceCamStatusReqVO();
+                reqVO.setCamChipId(chipId);
+                reqVO.setWorkStatus(node.path("workStatus").asText(node.path("status").asText("monitoring")));
+                if (node.hasNonNull("activeTargetIndex")) {
+                    reqVO.setActiveTargetIndex(node.path("activeTargetIndex").asInt());
+                } else if (node.hasNonNull("targetIndex")) {
+                    reqVO.setActiveTargetIndex(node.path("targetIndex").asInt());
+                }
+                reqVO.setActiveTargetChipId(node.path("activeTargetChipId").asText(node.path("targetChipId").asText(null)));
+                reqVO.setMessage(node.path("message").asText(null));
+                deviceCamService.reportStatus(reqVO);
+                return;
+            }
+
+            if ("camPresence".equals(type)) {
+                chipId = requireChipId(chipId, session, "camPresence");
+                if (chipId == null) return;
+                DeviceCamPresenceReqVO reqVO = new DeviceCamPresenceReqVO();
+                reqVO.setCamChipId(chipId);
+                reqVO.setWorkStatus(node.path("workStatus").asText("monitoring"));
+                if (node.hasNonNull("personCount")) {
+                    reqVO.setPersonCount(node.path("personCount").asInt());
+                }
+                if (node.hasNonNull("confidence")) {
+                    reqVO.setConfidence(node.path("confidence").asDouble());
+                }
+                reqVO.setDetectTime(node.path("detectTime").asText(node.path("timestamp").asText(null)));
+                JsonNode areasNode = node.get("areas");
+                if (areasNode != null && areasNode.isArray()) {
+                    List<DeviceCamPresenceReqVO.PresenceArea> areas = new ArrayList<>();
+                    for (JsonNode areaNode : areasNode) {
+                        areas.add(objectMapper.treeToValue(areaNode, DeviceCamPresenceReqVO.PresenceArea.class));
+                    }
+                    reqVO.setAreas(areas);
+                }
+                deviceCamService.reportPresence(reqVO);
+                return;
+            }
+
+            if ("personDetection".equals(type)) {
+                chipId = readChipId(node);
+                if (chipId == null) {
+                    log.warn("personDetection missing chipId, sessionId={}", session.getId());
+                    return;
+                }
+                DeviceDO device = findDevice(chipId);
+                if (device == null) {
+                    log.warn("personDetection rejected: unknown chipId={}, sessionId={}", chipId, session.getId());
+                    return;
+                }
+                deviceSessionManager.touch(chipId);
+                deviceLastSeenService.persistIfDue(chipId, deviceSessionManager.getLastSeen(chipId));
+                ObjectNode payload = node.deepCopy();
+                payload.remove("type");
+                payload.put("chipId", chipId);
+                payload.put("source", "deviceWs");
+                webSocketPushService.pushDevicePersonDetection(payload, device.getStoreId());
+                return;
+            }
+
+            if ("selfTest".equals(type)) {
+                chipId = requireChipId(chipId, session, "selfTest");
+                if (chipId == null) return;
+                JsonNode selfTestNode = node.get("selfTest");
+                if (selfTestNode == null || !selfTestNode.path("done").asBoolean(false)) {
+                    log.warn("selfTest ignored incomplete payload, chipId={}", chipId);
+                    return;
+                }
+                deviceSessionManager.touch(chipId);
+                saveDeviceSelfTest(chipId, selfTestNode);
+                return;
+            }
+
+            if ("trackingStatus".equals(type)) {
+                chipId = requireChipId(chipId, session, "trackingStatus");
+                if (chipId == null) return;
+                DeviceTrackingStatusReqVO reqVO = new DeviceTrackingStatusReqVO();
+                reqVO.setChipId(chipId);
+                reqVO.setRole(node.path("role").asText(null));
+                reqVO.setTrackingStatus(node.path("trackingStatus").asText(node.path("status").asText("unknown")));
+                reqVO.setCamChipId(node.path("camChipId").asText(null));
+                reqVO.setLampChipId(node.path("lampChipId").asText(node.path("targetChipId").asText(null)));
+                if (node.hasNonNull("targetIndex")) {
+                    reqVO.setTargetIndex(node.path("targetIndex").asInt());
+                }
+                if (node.hasNonNull("confidence")) {
+                    reqVO.setConfidence(node.path("confidence").asDouble());
+                }
+                if (node.hasNonNull("sequence")) {
+                    reqVO.setSequence(node.path("sequence").asLong());
+                } else if (node.hasNonNull("seq")) {
+                    reqVO.setSequence(node.path("seq").asLong());
+                }
+                reqVO.setMessage(node.path("message").asText(null));
+                deviceCamService.reportTrackingStatus(reqVO);
+                return;
+            }
+
             log.debug("Unknown device ws message: {}", preview(message.getPayload()));
         } catch (Exception e) {
             log.warn("Invalid device websocket message: sessionId={}, errorType={}",
                     session.getId(), e.getClass().getSimpleName());
             log.debug("Invalid device websocket payload preview: {}", preview(message.getPayload()), e);
+        }
+    }
+
+    private DeviceDO findDevice(String chipId) {
+        return deviceMapper.selectOne(
+                new LambdaQueryWrapper<DeviceDO>()
+                        .eq(DeviceDO::getChipId, chipId)
+                        .last("limit 1")
+        );
+    }
+
+    /**
+     * 规范化 chipId + 空值校验 + 心跳更新，用于非 register/ping 消息类型
+     * 的公共样板逻辑。返回 null 表示 chipId 无效，调用方应直接 return。
+     */
+    private String requireChipId(String chipId, WebSocketSession session, String msgType) {
+        String normalized = deviceSessionManager.normalizeChipId(chipId);
+        if (normalized == null) {
+            log.warn("{} missing chipId, sessionId={}", msgType, session.getId());
+            return null;
+        }
+        deviceSessionManager.touch(normalized);
+        return normalized;
+    }
+
+    private String readChipId(JsonNode node) {
+        String chipId = node.path("chipId").asText(null);
+        if (chipId == null || chipId.isBlank()) {
+            chipId = node.path("id").asText(null);
+        }
+        return deviceSessionManager.normalizeChipId(chipId);
+    }
+
+    private void pushCamRoiConfigIfNeeded(WebSocketSession session, DeviceDO device) {
+        if (!DeviceTypeUtil.isCam(device.getDeviceType())) {
+            return;
+        }
+        try {
+            DeviceCamRoiConfigVO config = deviceCamService.getRoiConfigForDevice(device.getChipId());
+            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(WsMessage.of("cameraRoiConfig", config))));
+        } catch (Exception e) {
+            log.warn("push cam roi config failed, chipId={}", device.getChipId(), e);
         }
     }
 
@@ -100,6 +284,18 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
         boolean progressChanged = false;
         String oldOtaStatus = normalizeOtaStatus(device.getOtaStatus());
         String newOtaStatus = oldOtaStatus;
+
+        String ip = node.path("ip").asText(null);
+        if (ip != null && !ip.isBlank()) {
+            device.setIp(ip);
+            changed = true;
+        }
+
+        String deviceType = node.path("deviceType").asText(null);
+        if (deviceType != null && !deviceType.isBlank()) {
+            device.setDeviceType(deviceType.trim().toLowerCase(Locale.ROOT));
+            changed = true;
+        }
 
         String fwVersion = node.path("fwVersion").asText(null);
         if (fwVersion != null && !fwVersion.isBlank()) {
@@ -163,7 +359,28 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        webSocketPushService.pushStateToDevice(chipId, DeviceConvert.convert(device));
+        DeviceRespVO stateVO = DeviceConvert.convert(device);
+        if (!DeviceTypeUtil.isCam(stateVO.getDeviceType())) {
+            webSocketPushService.pushStateToDevice(chipId, stateVO);
+        }
+    }
+
+    private void saveDeviceSelfTest(String chipId, JsonNode selfTestNode) throws Exception {
+        DeviceDO device = deviceMapper.selectOne(
+                new LambdaQueryWrapper<DeviceDO>()
+                        .eq(DeviceDO::getChipId, chipId)
+                        .last("limit 1")
+        );
+        if (device == null) {
+            log.warn("selfTest rejected: unknown chipId={}", chipId);
+            return;
+        }
+
+        device.setSelfTestJson(objectMapper.writeValueAsString(selfTestNode));
+        device.setSelfTestTime(LocalDateTime.now());
+        device.setUpdateTime(LocalDateTime.now());
+        deviceMapper.updateById(device);
+        webSocketPushService.pushState(otaProgressStore.applyProgress(DeviceConvert.convert(device)));
     }
 
     private boolean updateOtaProgress(String chipId, String oldStatus, String newStatus, Integer progress, boolean statusReported) {

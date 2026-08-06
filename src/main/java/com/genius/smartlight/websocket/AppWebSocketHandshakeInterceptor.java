@@ -10,13 +10,13 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
 import org.springframework.http.server.ServletServerHttpRequest;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.WebSocketHandler;
 import org.springframework.web.socket.server.HandshakeInterceptor;
-import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.Map;
 
@@ -38,15 +38,15 @@ public class AppWebSocketHandshakeInterceptor implements HandshakeInterceptor {
                                    ServerHttpResponse response,
                                    WebSocketHandler wsHandler,
                                    Map<String, Object> attributes) {
-        String tokenSource = null;
-        String token = resolveToken(request, new String[]{null});
+        String[] tokenSourceHolder = new String[1];
+        String token = resolveToken(request, tokenSourceHolder);
         if (token == null || token.isBlank()) {
-            tokenSource = "none";
             String wsCtx = buildWsContext(request, "browser");
             log.warn("[ws] event=auth_failed, wsType=browser, reason=missing token, tokenSource=none, {}", wsCtx);
-            return true;
+            response.setStatusCode(HttpStatus.UNAUTHORIZED);
+            return false;
         }
-        tokenSource = tokenSourceHolder[0];
+        String tokenSource = tokenSourceHolder[0];
 
         try {
             LoginUser loginUser = jwtTokenService.parseToken(token);
@@ -68,6 +68,8 @@ public class AppWebSocketHandshakeInterceptor implements HandshakeInterceptor {
             if (reason.length() > 80) reason = reason.substring(0, 80);
             String wsCtx = buildWsContext(request, "browser");
             log.warn("[ws] event=auth_failed, wsType=browser, reason={}, tokenSource={}, {}", reason, tokenSource, wsCtx);
+            response.setStatusCode(HttpStatus.UNAUTHORIZED);
+            return false;
         }
         return true;
     }
@@ -83,8 +85,6 @@ public class AppWebSocketHandshakeInterceptor implements HandshakeInterceptor {
         }
     }
 
-    private String[] tokenSourceHolder = new String[1];
-
     private String resolveToken(ServerHttpRequest request, String[] sourceOut) {
         String authHeader = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
@@ -98,22 +98,6 @@ public class AppWebSocketHandshakeInterceptor implements HandshakeInterceptor {
             return protocolToken;
         }
 
-        String queryToken = UriComponentsBuilder.fromUri(request.getURI())
-                .build()
-                .getQueryParams()
-                .getFirst("token");
-        if (queryToken != null && !queryToken.isBlank()) {
-            if (sourceOut != null) sourceOut[0] = "query";
-            return queryToken;
-        }
-
-        if (request instanceof ServletServerHttpRequest servletRequest) {
-            String token = servletRequest.getServletRequest().getParameter("token");
-            if (token != null && !token.isBlank()) {
-                if (sourceOut != null) sourceOut[0] = "query";
-                return token;
-            }
-        }
         return null;
     }
 

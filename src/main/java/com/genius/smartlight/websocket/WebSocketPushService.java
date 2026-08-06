@@ -117,6 +117,10 @@ public class WebSocketPushService {
         data.put("originalImageUrl", result.getOriginalImageUrl());
         data.put("annotatedImageUrl", result.getAnnotatedImageUrl());
         data.put("combinedImageUrl", result.getCombinedImageUrl());
+        data.put("resultVersion", result.getResultVersion());
+        data.put("segmentationFallback", result.getSegmentationFallback());
+        data.put("outfitType", result.getOutfitType());
+        data.put("garments", result.getGarments());
 
         broadcastToStore(storeId, "fabricRecognize", data);
     }
@@ -135,6 +139,34 @@ public class WebSocketPushService {
         broadcastToStore(storeId, "personDetection", data);
     }
 
+    public void pushDevicePersonDetection(Object data, Long storeId) {
+        broadcastToStore(storeId, "personDetection", data);
+    }
+
+    public void pushCamStatus(Object data, Long storeId) {
+        broadcastToStore(storeId, "camStatus", data);
+    }
+
+    public void pushCamPresence(Object data, Long storeId) {
+        broadcastToStore(storeId, "camPresence", data);
+    }
+
+    public void pushCamCaptureTask(Object data, Long storeId) {
+        broadcastToStore(storeId, "cameraCaptureTask", data);
+    }
+
+    public void pushCamCaptureResult(Object data, Long storeId) {
+        broadcastToStore(storeId, "cameraCaptureResult", data);
+    }
+
+    public void pushLampClothState(Object data, Long storeId) {
+        broadcastToStore(storeId, "lampClothState", data);
+    }
+
+    public void pushTrackingStatus(Object data, Long storeId) {
+        broadcastToStore(storeId, "trackingStatus", data);
+    }
+
     public void pushAnnounce(String chipId, String ip, String deviceType, Boolean added, Long storeId) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("chipId", chipId);
@@ -142,17 +174,12 @@ public class WebSocketPushService {
         data.put("deviceType", deviceType);
         data.put("added", added);
 
-        if (storeId != null) {
-            broadcastToStore(storeId, "announce", data);
+        if (storeId == null) {
+            broadcastAll("announce", data);
             return;
         }
 
-        try {
-            String payload = objectMapper.writeValueAsString(WsMessage.of("announce", data));
-            sessionManager.broadcastAll(payload);
-        } catch (Exception e) {
-            log.error("WebSocket broadcastAll failed, type=announce (unbound device)", e);
-        }
+        broadcastToStore(storeId, "announce", data);
     }
 
     @Deprecated
@@ -193,6 +220,15 @@ public class WebSocketPushService {
                     type, storeId, elapsedMs(broadcastStartNs));
         } catch (Exception e) {
             log.error("WebSocket broadcastToStore failed, type={} storeId={}", type, storeId, e);
+        }
+    }
+
+    private void broadcastAll(String type, Object data) {
+        try {
+            String payload = objectMapper.writeValueAsString(WsMessage.of(type, data));
+            sessionManager.broadcastAll(payload);
+        } catch (Exception e) {
+            log.error("WebSocket broadcastAll failed, type={}", type, e);
         }
     }
 

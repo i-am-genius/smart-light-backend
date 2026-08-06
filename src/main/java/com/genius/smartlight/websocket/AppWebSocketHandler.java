@@ -2,6 +2,7 @@ package com.genius.smartlight.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.genius.smartlight.websocket.fabric.FabricImagePushService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -20,6 +21,7 @@ public class AppWebSocketHandler extends TextWebSocketHandler {
 
     private final WebSocketSessionManager sessionManager;
     private final ObjectMapper objectMapper;
+    private final FabricImagePushService fabricImagePushService;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
@@ -54,6 +56,23 @@ public class AppWebSocketHandler extends TextWebSocketHandler {
 
             if ("ping".equals(type)) {
                 sessionManager.send(session, objectMapper.writeValueAsString(WsMessage.of("pong", "ok")));
+                return;
+            }
+
+            if ("capabilities".equals(type)) {
+                int version = node.path("data").path("version").asInt(0);
+                boolean requested = node.path("data").path("fabricImageBinary").asBoolean(false);
+                Long storeId = readLongAttribute(session, AppWebSocketHandshakeInterceptor.ATTR_STORE_ID);
+                if (requested && storeId != null
+                        && sessionManager.enableFabricImageBinary(session.getId(), version)) {
+                    sessionManager.send(session, objectMapper.writeValueAsString(
+                            WsMessage.of("capabilitiesAck", Map.of(
+                                    "fabricImageBinary", true,
+                                    "version", version
+                            ))
+                    ));
+                    fabricImagePushService.replayLatestToSession(session.getId(), storeId);
+                }
                 return;
             }
 

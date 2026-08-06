@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -20,6 +21,7 @@ public class DeviceSessionManager {
     private final Map<String, WebSocketSession> deviceSessionMap = new ConcurrentHashMap<>();
     private final Map<String, Long> lastSeenMap = new ConcurrentHashMap<>();
     private final Map<String, String> sessionDeviceMap = new ConcurrentHashMap<>();
+    private final Map<String, String> uploadTokenMap = new ConcurrentHashMap<>();
 
     public void registerDevice(String chipId, WebSocketSession session) {
         String normalizedChipId = normalizeChipId(chipId);
@@ -46,6 +48,25 @@ public class DeviceSessionManager {
         }
 
         // device_registered logged by DeviceWebSocketHandler
+    }
+
+    public String refreshUploadToken(String chipId) {
+        String normalizedChipId = normalizeChipId(chipId);
+        if (normalizedChipId == null) {
+            return null;
+        }
+        String token = UUID.randomUUID().toString().replace("-", "");
+        uploadTokenMap.put(normalizedChipId, token);
+        return token;
+    }
+
+    public boolean validateUploadToken(String chipId, String token) {
+        String trackedChipId = resolveTrackedChipId(chipId);
+        if (trackedChipId == null || token == null || token.isBlank()) {
+            return false;
+        }
+        String expected = uploadTokenMap.get(trackedChipId);
+        return expected != null && expected.equals(token.trim());
     }
 
     public void touch(String chipId) {

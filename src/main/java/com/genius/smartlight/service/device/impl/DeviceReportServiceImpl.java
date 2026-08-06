@@ -1,6 +1,7 @@
 package com.genius.smartlight.service.device.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
@@ -60,7 +61,7 @@ public class DeviceReportServiceImpl implements DeviceReportService {
             device.setIp(reqVO.getIp());
         }
         if (reqVO.getDeviceType() != null) {
-            device.setDeviceType(reqVO.getDeviceType());
+            device.setDeviceType(normalizeDeviceType(reqVO.getDeviceType()));
         }
         if (reqVO.getFirmwareVersion() != null) {
             device.setFirmwareVersion(reqVO.getFirmwareVersion());
@@ -181,6 +182,10 @@ public class DeviceReportServiceImpl implements DeviceReportService {
             return value;
         }
         return "idle";
+    }
+
+    private String normalizeDeviceType(String deviceType) {
+        return DeviceTypeUtil.normalize(deviceType);
     }
 
     private void logPerf(String chipId, String step, long startedNs) {

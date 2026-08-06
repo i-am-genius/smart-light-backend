@@ -1,6 +1,7 @@
 package com.genius.smartlight.service.device.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
@@ -122,6 +123,7 @@ public class DeviceServiceImpl implements DeviceService {
             exist.setRecommendedTemp(reqVO.getRecommendedTemp());
             exist.setFabric(reqVO.getFabric());
             exist.setMainColorRgb(reqVO.getMainColorRgb());
+            normalizeDeviceForCapabilities(exist);
             exist.setUpdateTime(now);
 
             deviceMapper.updateById(exist);
@@ -134,6 +136,7 @@ public class DeviceServiceImpl implements DeviceService {
         }
 
         DeviceDO device = DeviceConvert.convert(reqVO);
+        normalizeDeviceForCapabilities(device);
         device.setStoreId(store.getId());
         device.setCreateTime(now);
         device.setUpdateTime(now);
@@ -176,15 +179,19 @@ public class DeviceServiceImpl implements DeviceService {
         updateObj.setOtaStatus(device.getOtaStatus());
 
         updateObj.setDisplayName(reqVO.getDisplayName());
+        normalizeDeviceForCapabilities(updateObj);
 
         deviceMapper.updateById(updateObj);
 
-        DeviceRespVO respVO = toResp(updateObj);
+        DeviceDO currentDevice = getDeviceByIdForCurrentStore(id);
+        DeviceRespVO respVO = toResp(currentDevice);
 
         webSocketPushService.pushState(respVO);
-        webSocketPushService.pushStateToDevice(updateObj.getChipId(), respVO);
+        if (!DeviceTypeUtil.isCam(respVO.getDeviceType())) {
+            webSocketPushService.pushStateToDevice(currentDevice.getChipId(), respVO);
+        }
         log.info("Device updated, id={}, chipId={}, storeId={}, lightControl={}",
-                updateObj.getId(), updateObj.getChipId(), updateObj.getStoreId(), lightControl);
+                currentDevice.getId(), currentDevice.getChipId(), currentDevice.getStoreId(), lightControl);
     }
 
     @Override
@@ -380,5 +387,22 @@ public class DeviceServiceImpl implements DeviceService {
 
     private DeviceRespVO toResp(DeviceDO device) {
         return otaProgressStore.applyProgress(DeviceConvert.convert(device));
+    }
+
+    private void normalizeDeviceForCapabilities(DeviceDO device) {
+        String type = DeviceTypeUtil.normalize(device.getDeviceType());
+        device.setDeviceType(type);
+
+        if (!DeviceTypeUtil.isCam(type)) {
+            return;
+        }
+
+        device.setBrightness(null);
+        device.setTemp(null);
+        device.setAutoMode(null);
+        device.setRecommendedBrightness(null);
+        device.setRecommendedTemp(null);
+        device.setFabric(null);
+        device.setMainColorRgb(null);
     }
 }

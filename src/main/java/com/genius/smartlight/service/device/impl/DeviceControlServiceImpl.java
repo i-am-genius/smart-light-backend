@@ -2,6 +2,7 @@ package com.genius.smartlight.service.device.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
@@ -19,6 +20,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 @Service
@@ -55,6 +57,10 @@ public class DeviceControlServiceImpl implements DeviceControlService {
 
         if (!deviceSessionManager.isOnline(chipId)) {
             throw new ServiceException("设备未连接或已离线");
+        }
+
+        if (!isLampDevice(device)) {
+            throw new ServiceException("cam 设备不支持灯光状态同步");
         }
 
         if (reqVO.getBrightness() != null) {
@@ -108,5 +114,9 @@ public class DeviceControlServiceImpl implements DeviceControlService {
         DeviceRespVO respVO = DeviceConvert.convert(device);
         webSocketPushService.pushState(respVO);
         return respVO;
+    }
+
+    private boolean isLampDevice(DeviceDO device) {
+        return DeviceTypeUtil.isLampLike(device.getDeviceType());
     }
 }

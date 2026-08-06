@@ -3,6 +3,7 @@ package com.genius.smartlight.service.device.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
@@ -13,6 +14,7 @@ import com.genius.smartlight.dal.mysql.OtaFirmwareMapper;
 import com.genius.smartlight.dal.mysql.StoreMapper;
 import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.device.DeviceOtaService;
+import com.genius.smartlight.service.device.OtaDownloadSecurityService;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.device.DeviceOtaCheckRespVO;
 import com.genius.smartlight.vo.device.DeviceOtaStartReqVO;
@@ -42,6 +44,7 @@ public class DeviceOtaServiceImpl implements DeviceOtaService {
     private final WebSocketPushService webSocketPushService;
     private final ObjectMapper objectMapper;
     private final OtaProgressStore otaProgressStore;
+    private final OtaDownloadSecurityService otaDownloadSecurityService;
 
     /**
      * 按 chipId 查询设备并校验是否属于当前用户店铺。
@@ -93,13 +96,14 @@ public class DeviceOtaServiceImpl implements DeviceOtaService {
         if (!Boolean.TRUE.equals(firmware.getEnabled())) {
             throw new ServiceException("固件已禁用");
         }
-        if (!safeEquals(device.getDeviceType(), firmware.getDeviceType())) {
+        if (!safeEquals(normalizeDeviceType(device.getDeviceType()), normalizeDeviceType(firmware.getDeviceType()))) {
             throw new ServiceException("固件设备类型不匹配");
         }
         if (!safeEquals(targetChannel, normalizeChannel(firmware.getChannel()))) {
             throw new ServiceException("固件通道与目标通道不匹配");
         }
-        validateFileUrl(firmware.getFileUrl());
+        otaDownloadSecurityService.validateStoredFileUrl(firmware.getFileUrl());
+        String signedFileUrl = otaDownloadSecurityService.signDownloadUrl(firmware.getFileUrl());
 
         int currentCode = device.getFirmwareVersionCode() == null ? 0 : device.getFirmwareVersionCode();
         int targetCode = firmware.getVersionCode() == null ? 0 : firmware.getVersionCode();
@@ -112,7 +116,7 @@ public class DeviceOtaServiceImpl implements DeviceOtaService {
 
         ObjectNode msg = objectMapper.createObjectNode();
         msg.put("type", "ota_update");
-        msg.put("url", firmware.getFileUrl());
+        msg.put("url", signedFileUrl);
         msg.put("version", firmware.getVersion());
         msg.put("versionCode", firmware.getVersionCode());
         msg.put("channel", targetChannel);
@@ -150,7 +154,7 @@ public class DeviceOtaServiceImpl implements DeviceOtaService {
     private OtaFirmwareDO findLatestFirmware(DeviceDO device, String targetChannel) {
         return otaFirmwareMapper.selectOne(
                 new LambdaQueryWrapper<OtaFirmwareDO>()
-                        .eq(OtaFirmwareDO::getDeviceType, device.getDeviceType())
+                        .eq(OtaFirmwareDO::getDeviceType, normalizeDeviceType(device.getDeviceType()))
                         .eq(OtaFirmwareDO::getChannel, targetChannel)
                         .eq(OtaFirmwareDO::getEnabled, true)
                         .orderByDesc(OtaFirmwareDO::getVersionCode)
@@ -173,7 +177,7 @@ public class DeviceOtaServiceImpl implements DeviceOtaService {
             respVO.setFirmwareId(firmware.getId());
             respVO.setLatestVersion(firmware.getVersion());
             respVO.setLatestVersionCode(firmware.getVersionCode());
-            respVO.setFileUrl(firmware.getFileUrl());
+            respVO.setFileUrl(otaDownloadSecurityService.signDownloadUrl(firmware.getFileUrl()));
             respVO.setMd5(firmware.getMd5());
             respVO.setChangelog(firmware.getChangelog());
             int currentCode = device.getFirmwareVersionCode() == null ? 0 : device.getFirmwareVersionCode();
@@ -208,6 +212,10 @@ public class DeviceOtaServiceImpl implements DeviceOtaService {
             return CHANNEL_TEST;
         }
         return CHANNEL_STABLE;
+    }
+
+    private String normalizeDeviceType(String deviceType) {
+        return DeviceTypeUtil.normalize(deviceType);
     }
 
     private boolean safeEquals(String a, String b) {

@@ -1,6 +1,8 @@
 package com.genius.smartlight.controller.admin.ai;
 
 import com.genius.smartlight.common.CommonResult;
+import com.genius.smartlight.common.FileDownloadUtil;
+import com.genius.smartlight.common.MediaTypeUtil;
 import com.genius.smartlight.service.ai.AiService;
 import com.genius.smartlight.service.ai.FabricArchiveService;
 import com.genius.smartlight.vo.ai.FabricArchiveDeleteRespVO;
@@ -11,7 +13,9 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.core.io.Resource;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,6 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.nio.file.Path;
 
 @Tag(name = "AI识别接口", description = "服装面料识别、人流检测和识别图片留档管理接口")
 @RestController
@@ -54,6 +59,15 @@ public class AiController {
         return CommonResult.success(fabricArchiveService.deleteArchiveGroup(filename, baseName));
     }
 
+    @Operation(summary = "读取服装识别留档图片", description = "按当前店铺设备归属校验后返回留档图片")
+    @GetMapping("/fabric-archive/file")
+    public ResponseEntity<Resource> fabricArchiveFile(
+            @RequestParam(defaultValue = "combined") String type,
+            @RequestParam String filename) {
+        Path file = fabricArchiveService.getArchiveFile(type, filename);
+        return FileDownloadUtil.inlineFile(file, MediaTypeUtil.resolveImageMediaType(file.getFileName().toString()));
+    }
+
     @Operation(
             summary = "服装面料识别",
             description = "上传图片文件，chipId 为可选参数。返回面料 label、confidence、推荐色温亮度等"
@@ -65,6 +79,10 @@ public class AiController {
             @Parameter(description = "芯片唯一ID，可选")
             @RequestParam(required = false) String chipId) {
         return CommonResult.success(aiService.fabricRecognize(chipId, file));
+    }
+
+    private MediaType resolveImageMediaType(String filename) {
+        return MediaTypeUtil.resolveImageMediaType(filename);
     }
 
     @Operation(

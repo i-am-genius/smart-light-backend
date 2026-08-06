@@ -3,6 +3,7 @@ package com.genius.smartlight.controller.admin.device;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.genius.smartlight.common.CommonResult;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.dataobject.StoreDO;
@@ -13,6 +14,8 @@ import com.genius.smartlight.service.device.DeviceControlService;
 import com.genius.smartlight.vo.device.DeviceAnnounceReqVO;
 import com.genius.smartlight.vo.device.DeviceAnnounceRespVO;
 import com.genius.smartlight.vo.device.DeviceArmControlReqVO;
+import com.genius.smartlight.vo.device.DeviceCamAimTargetReqVO;
+import com.genius.smartlight.vo.device.DeviceCamPtzReqVO;
 import com.genius.smartlight.vo.device.DeviceFlowUploadReqVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
 import com.genius.smartlight.vo.device.DeviceStateSyncReqVO;
@@ -52,6 +55,14 @@ public class DeviceGatewayController {
     );
 
     private static final Set<String> ARM_SPEEDS = Set.of("slow", "normal", "fast");
+    private static final Set<String> PTZ_AXES = Set.of("yaw", "pitch", "roll", "all");
+    private static final Set<String> PTZ_DIRECTIONS = Set.of("left", "right", "up", "down", "cw", "ccw", "center");
+    private static final float ARM_PAN_MIN = -45f;
+    private static final float ARM_PAN_MAX = 45f;
+    private static final float ARM_TILT_MIN = -90f;
+    private static final float ARM_TILT_MAX = 90f;
+    private static final float CAM_PITCH_MIN = -90f;
+    private static final float CAM_PITCH_MAX = 90f;
 
     private final DeviceMapper deviceMapper;
     private final StoreMapper storeMapper;
@@ -112,6 +123,62 @@ public class DeviceGatewayController {
         return device;
     }
 
+    @Operation(summary = "控制 cam 摄像头三轴云台", description = "仅支持 deviceType=cam 的独立摄像头设备。下发 ptzControl 指令，不携带亮度、色温或自动模式字段。")
+    @PostMapping("/cam/ptz")
+    public CommonResult<Boolean> camPtzControl(@Valid @RequestBody DeviceCamPtzReqVO reqVO) {
+        DeviceDO device = getDeviceByChipIdForCurrentStore(reqVO.getChipId());
+        if (!DeviceTypeUtil.isCam(device.getDeviceType())) {
+            throw new ServiceException("Only cam devices support this PTZ endpoint");
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "ptzControl");
+
+        if (reqVO.getYaw() != null || reqVO.getPitch() != null || reqVO.getRoll() != null) {
+            validateCamPtzAbsolute(reqVO);
+            if (reqVO.getYaw() != null) payload.put("yaw", reqVO.getYaw());
+            if (reqVO.getPitch() != null) payload.put("pitch", reqVO.getPitch());
+            if (reqVO.getRoll() != null) payload.put("roll", reqVO.getRoll());
+        } else {
+            String axis = normalizePtzAxis(reqVO.getAxis());
+            String direction = normalizePtzDirection(reqVO.getDirection());
+            payload.put("axis", axis);
+            payload.put("direction", direction);
+            payload.put("step", normalizePtzStep(reqVO.getStep()));
+        }
+
+        sendToDevice(reqVO.getChipId(), payload);
+        return CommonResult.success(true);
+    }
+
+    @Operation(summary = "控制 cam 转向拍摄目标灯", description = "仅支持 deviceType=cam 的独立摄像头设备。下发 cameraAimTarget 指令，不携带亮度、色温或自动模式字段。")
+    @PostMapping("/cam/aim-target")
+    public CommonResult<Boolean> camAimTarget(@Valid @RequestBody DeviceCamAimTargetReqVO reqVO) {
+        DeviceDO camDevice = getDeviceByChipIdForCurrentStore(reqVO.getCamChipId());
+        if (!DeviceTypeUtil.isCam(camDevice.getDeviceType())) {
+            throw new ServiceException("Only cam devices support this aim-target endpoint");
+        }
+
+        String targetChipId = normalizeOptionalChipId(reqVO.getTargetChipId());
+        if (targetChipId != null) {
+            DeviceDO targetDevice = getDeviceByChipIdForCurrentStore(targetChipId);
+            if (!DeviceTypeUtil.isLampLike(targetDevice.getDeviceType())) {
+                throw new ServiceException("Target device must be lamp or camlamp");
+            }
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "cameraAimTarget");
+        payload.put("camChipId", reqVO.getCamChipId());
+        if (targetChipId != null) {
+            payload.put("targetChipId", targetChipId);
+        }
+        payload.put("targetIndex", normalizeTargetIndex(reqVO.getTargetIndex()));
+
+        sendToDevice(reqVO.getCamChipId(), payload);
+        return CommonResult.success(true);
+    }
+
     @Operation(summary = "控制设备云台方向/速度/摇杆", description = "根据 chipId 向设备 WebSocket 下发云台/机械臂控制指令。支持 arm_joystick(摇杆连续)、arm_stop(停止)、arm_position(精确位置)、arm_speed(切速度)、arm(方向动作/旧协议兼容)。")
     @PostMapping("/arm/{chipId}")
     public CommonResult<Boolean> armControl(
@@ -146,6 +213,7 @@ public class DeviceGatewayController {
             case "arm_position": {
                 // 精确位置控制 — 透传，允许部分字段
                 payload.put("type", "arm_position");
+                validateArmPosition(reqVO);
                 if (reqVO.getPan() != null) payload.put("pan", reqVO.getPan());
                 if (reqVO.getTilt() != null) payload.put("tilt", reqVO.getTilt());
                 if (reqVO.getSlider() != null) payload.put("slider", reqVO.getSlider());
@@ -275,6 +343,24 @@ public class DeviceGatewayController {
         }
     }
 
+    private void validateArmPosition(DeviceArmControlReqVO reqVO) {
+        validateRange("pan", reqVO.getPan(), ARM_PAN_MIN, ARM_PAN_MAX);
+        validateRange("tilt", reqVO.getTilt(), ARM_TILT_MIN, ARM_TILT_MAX);
+    }
+
+    private void validateCamPtzAbsolute(DeviceCamPtzReqVO reqVO) {
+        validateRange("pitch", reqVO.getPitch(), CAM_PITCH_MIN, CAM_PITCH_MAX);
+    }
+
+    private void validateRange(String field, Float value, float min, float max) {
+        if (value == null) {
+            return;
+        }
+        if (!Float.isFinite(value) || value < min || value > max) {
+            throw new ServiceException(field + " range must be " + min + " to " + max + " degrees");
+        }
+    }
+
     private void validateSliderPosition(String deviceType, String action, Integer position) {
         if (!"slider_position".equals(action)) {
             return;
@@ -296,5 +382,49 @@ public class DeviceGatewayController {
         }
         String normalized = value.trim().toLowerCase(Locale.ROOT);
         return normalized.isEmpty() ? null : normalized;
+    }
+
+    private String normalizePtzAxis(String value) {
+        String axis = normalizeText(value);
+        if (axis == null) {
+            axis = "all";
+        }
+        if (!PTZ_AXES.contains(axis)) {
+            throw new ServiceException("PTZ axis must be yaw, pitch, roll, or all");
+        }
+        return axis;
+    }
+
+    private String normalizePtzDirection(String value) {
+        String direction = normalizeText(value);
+        if (direction == null) {
+            direction = "center";
+        }
+        if (!PTZ_DIRECTIONS.contains(direction)) {
+            throw new ServiceException("PTZ direction is not supported");
+        }
+        return direction;
+    }
+
+    private int normalizePtzStep(Integer value) {
+        if (value == null) {
+            return 5;
+        }
+        return Math.max(1, Math.min(30, value));
+    }
+
+    private String normalizeOptionalChipId(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.isEmpty() ? null : normalized;
+    }
+
+    private int normalizeTargetIndex(Integer value) {
+        if (value == null) {
+            return 1;
+        }
+        return Math.max(1, Math.min(3, value));
     }
 }

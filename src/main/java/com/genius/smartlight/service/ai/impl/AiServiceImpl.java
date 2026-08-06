@@ -1,6 +1,7 @@
 package com.genius.smartlight.service.ai.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.convert.device.DeviceConvert;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
@@ -12,25 +13,27 @@ import com.genius.smartlight.integration.ai.FabricAiClient;
 import com.genius.smartlight.integration.ai.PersonDetectClient;
 import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.ai.AiService;
-import com.genius.smartlight.service.ai.MainColorResult;
-import com.genius.smartlight.service.ai.MainColorService;
+import com.genius.smartlight.service.ai.GarmentRecognitionProcessor;
+import com.genius.smartlight.service.ai.GarmentResultCodec;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
 import com.genius.smartlight.vo.ai.PersonDetectRespVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
 import com.genius.smartlight.websocket.WebSocketPushService;
+import com.genius.smartlight.websocket.fabric.FabricImageLiveNotifier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.util.UriUtils;
 
-import java.io.ByteArrayInputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -50,7 +53,6 @@ public class AiServiceImpl implements AiService {
     private static final String UNSUPPORTED_IMAGE_MESSAGE = "仅支持 JPG、PNG、WEBP 图片";
 
     private static final Path FABRIC_UPLOAD_BASE_DIR = Path.of("/opt/smartlight/uploads/fabric");
-    private static final String FABRIC_PUBLIC_BASE_URL = "https://api.genius.show/uploads/fabric";
     private static final DateTimeFormatter FILE_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
@@ -58,12 +60,20 @@ public class AiServiceImpl implements AiService {
     private final FabricAiClient fabricAiClient;
     private final PersonDetectClient personDetectClient;
     private final WebSocketPushService webSocketPushService;
-    private final MainColorService mainColorService;
+    private final GarmentRecognitionProcessor garmentRecognitionProcessor;
     private final StoreMapper storeMapper;
     private final PersonFlowRecordService personFlowRecordService;
+    private final FabricImageLiveNotifier fabricImageLiveNotifier;
 
     @Override
     public FabricRecognizeRespVO fabricRecognize(String chipId, MultipartFile file) {
+        return fabricRecognize(chipId, file, FABRIC_UPLOAD_BASE_DIR);
+    }
+
+    FabricRecognizeRespVO fabricRecognize(
+            String chipId,
+            MultipartFile file,
+            Path archiveBaseDirectory) {
         long totalStart = System.currentTimeMillis();
         String filename = file == null ? "" : file.getOriginalFilename();
         long fileSize = file == null ? 0L : file.getSize();
@@ -73,23 +83,22 @@ public class AiServiceImpl implements AiService {
         try {
             validateFile(file);
             validated = true;
+            Long deviceStoreId = resolveOwnedDeviceStoreId(chipId);
 
-            // 读取文件字节，保存原始图片到 A 服务器，然后用字节包装调用 AI
-            byte[] imageBytes;
-            try {
-                imageBytes = file.getBytes();
-            } catch (IOException e) {
-                throw new ServiceException("读取上传图片失败");
-            }
             String originalContentType = file.getContentType();
-            String fileBase = buildImageFileBase(chipId);
+            String archiveId = buildImageFileBase(chipId);
             String originalExtension = resolveExtension(file.getOriginalFilename(), originalContentType);
-            String originalFilename = fileBase + "_original" + originalExtension;
+            String originalFilename = archiveId + "_original" + originalExtension;
 
             long saveOriginalStart = System.currentTimeMillis();
             try {
-                ensureFabricUploadDirs();
-                saveImageBytes(imageBytes, "original", originalFilename);
+                ensureFabricUploadDirs(archiveBaseDirectory);
+                saveMultipartFileAtomic(
+                        file,
+                        archiveBaseDirectory,
+                        "original",
+                        originalFilename
+                );
             } catch (IOException e) {
                 throw new ServiceException("保存原始图片失败");
             } finally {
@@ -97,76 +106,78 @@ public class AiServiceImpl implements AiService {
                         chipId, filename, fileSize, System.currentTimeMillis() - saveOriginalStart);
             }
 
-            MultipartFile aiFile = wrapBytesAsMultipartFile(imageBytes, file.getOriginalFilename(), originalContentType);
-
             long pythonStart = System.currentTimeMillis();
             FabricRecognizeRespVO result;
             try {
-                result = fabricAiClient.recognize(aiFile, chipId);
+                result = fabricAiClient.recognize(
+                        file,
+                        chipId,
+                        archiveId,
+                        false
+                );
             } finally {
                 log.debug("fabricRecognize cost step=pythonRecognize chipId={} filename={} fileSize={} costMs={}",
                         chipId, filename, fileSize, System.currentTimeMillis() - pythonStart);
             }
+            garmentRecognitionProcessor.process(result);
 
             // 如果 AI 返回存档 base64（远程模式），由 A 后端保存图片
-            String annotatedFilename = fileBase + "_annotated.jpg";
-            String combinedFilename = fileBase + "_combined.jpg";
-            boolean savedLocally = saveArchiveImagesFromBase64(result, annotatedFilename, combinedFilename,
-                    chipId, filename, fileSize);
+            String annotatedFilename = archiveId + "_annotated.jpg";
+            String combinedFilename = archiveId + "_combined.jpg";
+            String aiAnnotatedImagePath = result.getAnnotatedImagePath();
+            ArchiveSaveResult savedArchives = saveArchiveImagesFromBase64(
+                    result, annotatedFilename, combinedFilename,
+                    chipId, filename, fileSize, archiveBaseDirectory);
+            boolean annotatedAvailable = savedArchives.annotatedSaved()
+                    || archiveFileExists(
+                    archiveBaseDirectory,
+                    "annotated",
+                    annotatedFilename
+            );
+            boolean combinedAvailable = savedArchives.combinedSaved()
+                    || archiveFileExists(
+                    archiveBaseDirectory,
+                    "combined",
+                    combinedFilename
+            );
 
             // 始终使用 A 后端生成的 original URL
-            result.setOriginalImagePath(FABRIC_UPLOAD_BASE_DIR.resolve("original").resolve(originalFilename)
-                    .toString().replace("\\", "/"));
-            result.setOriginalImageUrl(FABRIC_PUBLIC_BASE_URL + "/original/" + originalFilename);
+            result.setOriginalImagePath("original/" + originalFilename);
+            result.setOriginalImageUrl(buildArchiveFileUrl("original", originalFilename));
 
-            // 如果后端成功保存了 annotated/combined，优先使用本地 URL
-            if (savedLocally) {
-                result.setAnnotatedImagePath(FABRIC_UPLOAD_BASE_DIR.resolve("annotated").resolve(annotatedFilename)
-                        .toString().replace("\\", "/"));
-                result.setAnnotatedImageUrl(FABRIC_PUBLIC_BASE_URL + "/annotated/" + annotatedFilename);
-                result.setCombinedImagePath(FABRIC_UPLOAD_BASE_DIR.resolve("combined").resolve(combinedFilename)
-                        .toString().replace("\\", "/"));
-                result.setCombinedImageUrl(FABRIC_PUBLIC_BASE_URL + "/combined/" + combinedFilename);
-            }
+            log.info("archiveSaveResult chipId={} annotatedSaved={} combinedSaved={} annotatedB64Present={}",
+                    chipId, savedArchives.annotatedSaved(), savedArchives.combinedSaved(),
+                    result.getArchiveAnnotatedJpgBase64() != null && !result.getArchiveAnnotatedJpgBase64().isBlank());
+            applyLocalArchiveLocations(
+                    result,
+                    annotatedFilename,
+                    combinedFilename,
+                    annotatedAvailable,
+                    combinedAvailable
+            );
+            clearUnsafeArchiveLocations(
+                    result,
+                    annotatedAvailable,
+                    combinedAvailable
+            );
 
             // 清除存档 base64 字段，避免泄漏到前端或数据库
             result.setArchiveAnnotatedJpgBase64(null);
             result.setArchiveCombinedJpgBase64(null);
 
-            MainColorResult colorResult;
-            long mainColorStart = System.currentTimeMillis();
-            try {
-                String maskedBase64 = result.getClothMaskedPngBase64();
-                if (maskedBase64 != null && !maskedBase64.isBlank()) {
-                    try (InputStream maskedStream = Base64.getDecoder().wrap(
-                            new ByteArrayInputStream(maskedBase64.getBytes(StandardCharsets.ISO_8859_1)))) {
-                        colorResult = mainColorService.extract(maskedStream);
-                    }
-                } else {
-                    colorResult = mainColorService.extract(new ByteArrayInputStream(imageBytes));
-                }
-            } catch (Exception e) {
-                log.warn("fabricRecognize main color extract failed chipId={} filename={} fileSize={}",
-                        chipId, filename, fileSize, e);
-                colorResult = new MainColorResult("128,128,128", 60, 4500);
-            } finally {
-                log.debug("fabricRecognize cost step=mainColorExtract chipId={} filename={} fileSize={} costMs={}",
-                        chipId, filename, fileSize, System.currentTimeMillis() - mainColorStart);
-            }
-
-            MainColorResult adjustedColorResult = applyFabricAdjustment(colorResult, result.getLabel());
-            result.setMainColorRgb(adjustedColorResult.getMainColorRgb());
-            result.setRecommendedBrightness(adjustedColorResult.getRecommendedBrightness());
-            result.setRecommendedTemp(adjustedColorResult.getRecommendedTemp());
-
-            Long deviceStoreId = null;
+            DeviceDO updatedDevice = null;
             long updateStart = System.currentTimeMillis();
             try {
                 if (chipId != null && !chipId.isBlank()) {
-                    DeviceDO device = updateDeviceAiResult(chipId, result);
-                    if (device != null) {
-                        deviceStoreId = device.getStoreId();
+                    updatedDevice = updateDeviceAiResult(chipId, result);
+                    if (updatedDevice != null) {
+                        deviceStoreId = updatedDevice.getStoreId();
+                        log.info("updateDeviceAiResult OK chipId={} deviceId={} storeId={}", chipId, updatedDevice.getId(), deviceStoreId);
+                    } else {
+                        log.warn("updateDeviceAiResult returned null, chipId={}", chipId);
                     }
+                } else {
+                    log.warn("updateDeviceAiResult skipped: chipId is blank, chipId={}", chipId);
                 }
             } finally {
                 log.debug("fabricRecognize cost step=updateDeviceAndPushState chipId={} filename={} fileSize={} costMs={} skipped={}",
@@ -176,11 +187,29 @@ public class AiServiceImpl implements AiService {
 
             long wsStart = System.currentTimeMillis();
             try {
-                webSocketPushService.pushFabricRecognize(chipId, file.getOriginalFilename(), result, deviceStoreId);
+                if (updatedDevice != null) {
+                    log.info("pushFabricRecognize chipId={} storeId={} annotatedImageUrl={} originalImageUrl={}",
+                            chipId, deviceStoreId, result.getAnnotatedImageUrl(), result.getOriginalImageUrl());
+                    webSocketPushService.pushFabricRecognize(
+                            chipId,
+                            file.getOriginalFilename(),
+                            result,
+                            deviceStoreId
+                    );
+                } else {
+                    log.warn("pushFabricRecognize skipped: updatedDevice is null, chipId={}", chipId);
+                }
             } finally {
                 log.debug("fabricRecognize cost step=pushFabricRecognize chipId={} filename={} fileSize={} costMs={}",
                         chipId, filename, fileSize, System.currentTimeMillis() - wsStart);
             }
+            fabricImageLiveNotifier.pushIfPresent(
+                    deviceStoreId,
+                    chipId,
+                    archiveBaseDirectory,
+                    annotatedAvailable ? annotatedFilename : null,
+                    aiAnnotatedImagePath
+            );
 
             result.setClothMaskedPngBase64(null);
             return result;
@@ -204,9 +233,9 @@ public class AiServiceImpl implements AiService {
         try {
             validateFile(file);
             validated = true;
-            PersonDetectRespVO result = personDetectClient.detect(file);
+            PersonDetectRespVO result = personDetectClient.detect(file, false);
 
-            Long storeId = resolveDeviceStoreIdIfOwned(chipId);
+            Long storeId = resolveOwnedDeviceStoreId(chipId);
 
             PersonFlowRecordDO saved = null;
             try {
@@ -240,7 +269,7 @@ public class AiServiceImpl implements AiService {
         PersonFlowRecordDO record = new PersonFlowRecordDO();
 
         if (storeId == null) {
-            storeId = resolveStoreIdForFlowRecord(chipId);
+            storeId = resolveCurrentStoreId();
         }
         record.setStoreId(storeId);
 
@@ -282,7 +311,7 @@ public class AiServiceImpl implements AiService {
         }
     }
 
-    private Long resolveDeviceStoreIdIfOwned(String chipId) {
+    private Long resolveOwnedDeviceStoreId(String chipId) {
         if (chipId == null || chipId.isBlank()) {
             return null;
         }
@@ -291,50 +320,40 @@ public class AiServiceImpl implements AiService {
                         .eq(DeviceDO::getChipId, chipId)
         );
         if (device == null || device.getStoreId() == null) {
-            return null;
+            throw new ServiceException("AI device does not exist or is not bound to a store");
         }
-        Long currentUserId = SecurityUtils.getCurrentUserId();
-        StoreDO store = storeMapper.selectOne(
-                new LambdaQueryWrapper<StoreDO>()
-                        .eq(StoreDO::getUserId, currentUserId)
-                        .last("limit 1")
-        );
+        // 设备端请求（无登录用户）：设备已通过 task token 鉴权，直接返回设备所属 storeId
+        Long currentUserId = SecurityUtils.getCurrentUserIdOrNull();
+        if (currentUserId == null) {
+            return device.getStoreId();
+        }
+        StoreDO store = getCurrentUserStore(currentUserId);
         if (store == null || !device.getStoreId().equals(store.getId())) {
             log.warn("AI chipId ownership check failed, chipId={} deviceStoreId={} currentUserId={}",
                     chipId, device.getStoreId(), currentUserId);
-            return null;
+            throw new ServiceException("No permission to use this device for AI recognition");
         }
         return device.getStoreId();
     }
 
-    private Long resolveStoreIdForFlowRecord(String chipId) {
-        if (chipId != null && !chipId.isBlank()) {
-            DeviceDO device = deviceMapper.selectOne(
-                    new LambdaQueryWrapper<DeviceDO>()
-                            .eq(DeviceDO::getChipId, chipId)
-                            .last("limit 1")
-            );
-            if (device != null && device.getStoreId() != null) {
-                return device.getStoreId();
-            }
+    private Long resolveCurrentStoreId() {
+        Long userId = SecurityUtils.getCurrentUserId();
+        StoreDO store = getCurrentUserStore(userId);
+        if (store == null) {
+            throw new ServiceException("Current user has no store");
         }
+        return store.getId();
+    }
 
-        try {
-            Long userId = SecurityUtils.getCurrentUserId();
-            StoreDO store = storeMapper.selectOne(
-                    new LambdaQueryWrapper<StoreDO>()
-                            .eq(StoreDO::getUserId, userId)
-                            .last("limit 1")
-            );
-            if (store != null) {
-                return store.getId();
-            }
-        } catch (Exception e) {
-            log.debug("Cannot resolve store from current user for flow record", e);
+    private StoreDO getCurrentUserStore(Long userId) {
+        if (userId == null) {
+            return null;
         }
-
-        log.warn("Cannot resolve store_id for person_flow_record, chipId={}", chipId);
-        return null;
+        return storeMapper.selectOne(
+                new LambdaQueryWrapper<StoreDO>()
+                        .eq(StoreDO::getUserId, userId)
+                        .last("limit 1")
+        );
     }
 
     private DeviceDO updateDeviceAiResult(String chipId, FabricRecognizeRespVO result) {
@@ -347,70 +366,42 @@ public class AiServiceImpl implements AiService {
             return null;
         }
 
-        Long currentUserId = SecurityUtils.getCurrentUserId();
-        StoreDO currentUserStore = storeMapper.selectOne(
-                new LambdaQueryWrapper<StoreDO>()
-                        .eq(StoreDO::getUserId, currentUserId)
-                        .last("limit 1")
-        );
-        if (currentUserStore == null || device.getStoreId() == null
-                || !device.getStoreId().equals(currentUserStore.getId())) {
-            log.warn("AI result write rejected, chipId={} deviceStoreId={} currentUserId={}",
-                    chipId, device.getStoreId(), currentUserId);
-            return null;
+        // 设备端请求（无登录用户）：设备已通过 task token 鉴权，跳过用户级所有权校验
+        Long currentUserId = SecurityUtils.getCurrentUserIdOrNull();
+        if (currentUserId != null) {
+            StoreDO currentUserStore = storeMapper.selectOne(
+                    new LambdaQueryWrapper<StoreDO>()
+                            .eq(StoreDO::getUserId, currentUserId)
+                            .last("limit 1")
+            );
+            if (currentUserStore == null || device.getStoreId() == null
+                    || !device.getStoreId().equals(currentUserStore.getId())) {
+                log.warn("AI result write rejected, chipId={} deviceStoreId={} currentUserId={}",
+                        chipId, device.getStoreId(), currentUserId);
+                return null;
+            }
         }
 
+        LocalDateTime recognizedAt = LocalDateTime.now();
+        String garmentJson = GarmentResultCodec.encode(result, recognizedAt);
         device.setFabric(result.getLabel());
         device.setMainColorRgb(result.getMainColorRgb());
         device.setRecommendedBrightness(result.getRecommendedBrightness());
         device.setRecommendedTemp(result.getRecommendedTemp());
-        device.setUpdateTime(LocalDateTime.now());
-        deviceMapper.updateById(device);
+        device.setGarmentResultJson(garmentJson);
+        device.setUpdateTime(recognizedAt);
+        int updatedRows = deviceMapper.updateById(device);
+        if (updatedRows != 1) {
+            throw new ServiceException("AI result update failed");
+        }
 
         DeviceRespVO respVO = DeviceConvert.convert(device);
         webSocketPushService.pushState(respVO);
-        webSocketPushService.pushStateToDevice(chipId, respVO);
-
-        return device;
-    }
-
-    private MainColorResult applyFabricAdjustment(MainColorResult colorResult, String fabric) {
-        MainColorResult baseResult = colorResult == null
-                ? new MainColorResult("128,128,128", 60, 4500)
-                : colorResult;
-
-        int brightness = baseResult.getRecommendedBrightness() == null
-                ? 60
-                : baseResult.getRecommendedBrightness();
-        int temp = baseResult.getRecommendedTemp() == null
-                ? 4500
-                : baseResult.getRecommendedTemp();
-
-        String normalizedFabric = normalizeFabric(fabric);
-        if (normalizedFabric.contains("cotton")) {
-            brightness += 5;
-            temp += 100;
-        } else if (normalizedFabric.contains("polyester")) {
-            brightness -= 5;
-            temp += 150;
-        } else if (normalizedFabric.contains("wool") || normalizedFabric.contains("cashmere")) {
-            brightness -= 3;
-            temp -= 250;
+        if (!DeviceTypeUtil.isCam(respVO.getDeviceType())) {
+            webSocketPushService.pushStateToDevice(chipId, respVO);
         }
 
-        return new MainColorResult(
-                baseResult.getMainColorRgb(),
-                clamp(brightness, 30, 95),
-                clamp(temp, 2700, 6500)
-        );
-    }
-
-    private String normalizeFabric(String fabric) {
-        return fabric == null ? "" : fabric.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
+        return device;
     }
 
     private void validateFile(MultipartFile file) {
@@ -480,6 +471,9 @@ public class AiServiceImpl implements AiService {
         String safeChipId = chipId != null && !chipId.isBlank()
                 ? chipId.replaceAll("[^A-Za-z0-9_-]", "")
                 : "unknown";
+        if (safeChipId.length() > 64) {
+            safeChipId = safeChipId.substring(0, 64);
+        }
         String timestamp = LocalDateTime.now().format(FILE_TIMESTAMP_FORMATTER);
         byte[] randomBytes = new byte[4];
         SECURE_RANDOM.nextBytes(randomBytes);
@@ -490,37 +484,164 @@ public class AiServiceImpl implements AiService {
     /**
      * 确保 fabric 三级存档目录存在
      */
-    private void ensureFabricUploadDirs() throws IOException {
+    private void ensureFabricUploadDirs(Path baseDirectory) throws IOException {
+        Path normalizedBaseDirectory = baseDirectory.toAbsolutePath().normalize();
         for (String subdir : new String[]{"original", "annotated", "combined"}) {
-            Files.createDirectories(FABRIC_UPLOAD_BASE_DIR.resolve(subdir));
+            Path directory = normalizedBaseDirectory.resolve(subdir).normalize();
+            if (!directory.startsWith(normalizedBaseDirectory)) {
+                throw new IOException("Invalid fabric archive path");
+            }
+            Files.createDirectories(directory);
+        }
+    }
+
+    private static String buildArchiveFileUrl(String type, String filename) {
+        return "/admin/ai/fabric-archive/file?type="
+                + UriUtils.encode(type, StandardCharsets.UTF_8)
+                + "&filename="
+                + UriUtils.encode(filename, StandardCharsets.UTF_8);
+    }
+
+    static void applyLocalArchiveLocations(FabricRecognizeRespVO result,
+                                           String annotatedFilename,
+                                           String combinedFilename,
+                                           boolean annotatedSaved,
+                                           boolean combinedSaved) {
+        if (annotatedSaved) {
+            result.setAnnotatedImagePath("annotated/" + annotatedFilename);
+            result.setAnnotatedImageUrl(buildArchiveFileUrl("annotated", annotatedFilename));
+        }
+        if (combinedSaved) {
+            result.setCombinedImagePath("combined/" + combinedFilename);
+            result.setCombinedImageUrl(buildArchiveFileUrl("combined", combinedFilename));
+        }
+    }
+
+    private static void clearUnsafeArchiveLocations(
+            FabricRecognizeRespVO result,
+            boolean annotatedAvailable,
+            boolean combinedAvailable) {
+        if (!annotatedAvailable) {
+            if (isLocalFilesystemLocation(result.getAnnotatedImagePath())) {
+                result.setAnnotatedImagePath(null);
+            }
+            if (isLocalFilesystemLocation(result.getAnnotatedImageUrl())) {
+                result.setAnnotatedImageUrl(null);
+            }
+        }
+        if (!combinedAvailable) {
+            if (isLocalFilesystemLocation(result.getCombinedImagePath())) {
+                result.setCombinedImagePath(null);
+            }
+            if (isLocalFilesystemLocation(result.getCombinedImageUrl())) {
+                result.setCombinedImageUrl(null);
+            }
+        }
+    }
+
+    private static boolean isLocalFilesystemLocation(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String normalized = value.trim().replace('\\', '/');
+        if (normalized.startsWith("/admin/ai/fabric-archive/file?")) {
+            return false;
+        }
+        return normalized.startsWith("/")
+                || normalized.startsWith("file:")
+                || normalized.matches("^[A-Za-z]:/.*");
+    }
+
+    private static boolean archiveFileExists(
+            Path baseDirectory,
+            String subdir,
+            String filename) {
+        Path normalizedBaseDirectory = baseDirectory.toAbsolutePath().normalize();
+        Path directory = normalizedBaseDirectory.resolve(subdir).normalize();
+        Path target = directory.resolve(filename).normalize();
+        return directory.startsWith(normalizedBaseDirectory)
+                && target.startsWith(directory)
+                && Files.isRegularFile(target);
+    }
+
+    static void saveMultipartFileAtomic(
+            MultipartFile file,
+            Path baseDirectory,
+            String subdir,
+            String filename) throws IOException {
+        Path normalizedBaseDirectory = baseDirectory.toAbsolutePath().normalize();
+        Path directory = normalizedBaseDirectory.resolve(subdir).normalize();
+        if (!directory.startsWith(normalizedBaseDirectory)) {
+            throw new IOException("Invalid fabric archive path");
+        }
+        Files.createDirectories(directory);
+
+        Path target = directory.resolve(filename).normalize();
+        Path temp = directory.resolve(filename + ".tmp").normalize();
+        if (!target.startsWith(directory) || !temp.startsWith(directory)) {
+            throw new IOException("Invalid fabric archive path");
+        }
+
+        try {
+            try (InputStream input = file.getInputStream()) {
+                Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING);
+            }
+            try {
+                Files.move(
+                        temp,
+                        target,
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(
+                        temp,
+                        target,
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+            }
+        } finally {
+            Files.deleteIfExists(temp);
         }
     }
 
     /**
      * 将字节写入存档子目录
      */
-    private void saveImageBytes(byte[] bytes, String subdir, String filename) throws IOException {
-        Path targetPath = FABRIC_UPLOAD_BASE_DIR.resolve(subdir).resolve(filename);
+    private void saveImageBytes(
+            byte[] bytes,
+            Path baseDirectory,
+            String subdir,
+            String filename) throws IOException {
+        Path normalizedBaseDirectory = baseDirectory.toAbsolutePath().normalize();
+        Path directory = normalizedBaseDirectory.resolve(subdir).normalize();
+        Path targetPath = directory.resolve(filename).normalize();
+        if (!directory.startsWith(normalizedBaseDirectory)
+                || !targetPath.startsWith(directory)) {
+            throw new IOException("Invalid fabric archive path");
+        }
         Files.write(targetPath, bytes);
         log.debug("fabric archive saved: {}", targetPath);
     }
 
     /**
      * 从 AI 返回的 base64 解码并保存 annotated 和 combined 图片。
-     * 返回 true 表示至少保存了一张图。
+     * 分别记录两类图片是否成功保存，避免其中一类失败时覆盖 AI 返回的有效路径。
      */
-    private boolean saveArchiveImagesFromBase64(FabricRecognizeRespVO result,
-                                                  String annotatedFilename,
-                                                  String combinedFilename,
-                                                  String chipId, String filename, long fileSize) {
-        boolean saved = false;
+    private ArchiveSaveResult saveArchiveImagesFromBase64(FabricRecognizeRespVO result,
+                                                           String annotatedFilename,
+                                                           String combinedFilename,
+                                                           String chipId, String filename, long fileSize,
+                                                           Path baseDirectory) {
+        boolean annotatedSaved = false;
         long start = System.currentTimeMillis();
         try {
             String annotatedB64 = result.getArchiveAnnotatedJpgBase64();
             if (annotatedB64 != null && !annotatedB64.isBlank()) {
                 byte[] decoded = Base64.getDecoder().decode(annotatedB64);
-                saveImageBytes(decoded, "annotated", annotatedFilename);
-                saved = true;
+                validateArchiveImageBytes(decoded);
+                saveImageBytes(decoded, baseDirectory, "annotated", annotatedFilename);
+                annotatedSaved = true;
             }
         } catch (Exception e) {
             log.warn("fabricRecognize failed to save annotated archive chipId={} filename={}", chipId, filename, e);
@@ -530,12 +651,14 @@ public class AiServiceImpl implements AiService {
         }
 
         long combinedStart = System.currentTimeMillis();
+        boolean combinedSaved = false;
         try {
             String combinedB64 = result.getArchiveCombinedJpgBase64();
             if (combinedB64 != null && !combinedB64.isBlank()) {
                 byte[] decoded = Base64.getDecoder().decode(combinedB64);
-                saveImageBytes(decoded, "combined", combinedFilename);
-                saved = true;
+                validateArchiveImageBytes(decoded);
+                saveImageBytes(decoded, baseDirectory, "combined", combinedFilename);
+                combinedSaved = true;
             }
         } catch (Exception e) {
             log.warn("fabricRecognize failed to save combined archive chipId={} filename={}", chipId, filename, e);
@@ -544,12 +667,24 @@ public class AiServiceImpl implements AiService {
                     chipId, filename, fileSize, System.currentTimeMillis() - combinedStart);
         }
 
-        return saved;
+        return new ArchiveSaveResult(annotatedSaved, combinedSaved);
+    }
+
+    private record ArchiveSaveResult(boolean annotatedSaved, boolean combinedSaved) {
     }
 
     /**
      * 根据文件名和 MIME 类型推断图片扩展名（含点号）
      */
+    private void validateArchiveImageBytes(byte[] bytes) {
+        if (bytes == null || bytes.length == 0 || bytes.length > AI_IMAGE_MAX_SIZE) {
+            throw new ServiceException("AI archive image is invalid");
+        }
+        if (!hasAllowedImageMagic(bytes, Math.min(bytes.length, 12))) {
+            throw new ServiceException("AI archive image format is invalid");
+        }
+    }
+
     private String resolveExtension(String filename, String contentType) {
         if (filename != null && filename.contains(".")) {
             String ext = filename.substring(filename.lastIndexOf('.')).toLowerCase(Locale.ROOT);
@@ -566,52 +701,5 @@ public class AiServiceImpl implements AiService {
             };
         }
         return ".jpg";
-    }
-
-    /**
-     * 将字节数组包装为 MultipartFile，用于 AI 调用（原始流已被读取）
-     */
-    private static MultipartFile wrapBytesAsMultipartFile(byte[] bytes, String originalFilename, String contentType) {
-        return new MultipartFile() {
-            @Override
-            public String getName() {
-                return "image";
-            }
-
-            @Override
-            public String getOriginalFilename() {
-                return originalFilename != null ? originalFilename : "image.jpg";
-            }
-
-            @Override
-            public String getContentType() {
-                return contentType;
-            }
-
-            @Override
-            public boolean isEmpty() {
-                return bytes.length == 0;
-            }
-
-            @Override
-            public long getSize() {
-                return bytes.length;
-            }
-
-            @Override
-            public byte[] getBytes() {
-                return bytes;
-            }
-
-            @Override
-            public InputStream getInputStream() {
-                return new ByteArrayInputStream(bytes);
-            }
-
-            @Override
-            public void transferTo(File dest) throws IOException {
-                Files.write(dest.toPath(), bytes);
-            }
-        };
     }
 }

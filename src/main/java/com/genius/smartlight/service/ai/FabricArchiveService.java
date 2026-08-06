@@ -32,7 +32,6 @@ import java.util.stream.Stream;
 public class FabricArchiveService {
 
     private static final Path FABRIC_ARCHIVE_BASE_DIR = Path.of("/opt/smartlight/uploads/fabric");
-    private static final String FABRIC_ARCHIVE_BASE_URL = "https://api.genius.show/uploads/fabric";
     private static final Set<String> FABRIC_ARCHIVE_TYPES = Set.of("original", "annotated", "combined");
     private static final Set<String> FABRIC_ARCHIVE_EXTENSIONS = Set.of(".jpg", ".jpeg", ".png");
     private static final DateTimeFormatter FILENAME_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
@@ -67,7 +66,7 @@ public class FabricArchiveService {
                         .filter(Files::isRegularFile)
                         .filter(this::isArchiveImage)
                         .map(path -> buildArchiveItem(path, normalizedType))
-                        .filter(item -> allowedChipIds.isEmpty() || allowedChipIds.contains(item.getChipId()))
+                        .filter(item -> allowedChipIds.contains(item.getChipId()))
                         .sorted(Comparator.comparing(
                                 item -> readLastModifiedMillis(targetDir.resolve(item.getFilename())),
                                 Comparator.reverseOrder()
@@ -121,17 +120,16 @@ public class FabricArchiveService {
                     return respVO;
                 }
 
-                String filePath = candidate.toString();
                 if (!Files.exists(candidate)) {
-                    respVO.getMissingFiles().add(filePath);
+                    respVO.getMissingFiles().add(candidate.getFileName().toString());
                     continue;
                 }
 
                 if (Files.isRegularFile(candidate)) {
                     Files.delete(candidate);
-                    respVO.getDeletedFiles().add(filePath);
+                    respVO.getDeletedFiles().add(candidate.getFileName().toString());
                 } else {
-                    respVO.getMissingFiles().add(filePath);
+                    respVO.getMissingFiles().add(candidate.getFileName().toString());
                 }
             }
         }
@@ -145,6 +143,30 @@ public class FabricArchiveService {
             respVO.setMsg("归档图片组不存在");
         }
         return respVO;
+    }
+
+    public Path getArchiveFile(String type, String filename) {
+        String normalizedType = normalizeArchiveType(type);
+        if (filename == null || filename.isBlank()
+                || filename.contains("..")
+                || filename.contains("/")
+                || filename.contains("\\")) {
+            throw new ServiceException("Invalid archive filename");
+        }
+
+        Path target = FABRIC_ARCHIVE_BASE_DIR
+                .resolve(normalizedType)
+                .resolve(filename.trim())
+                .normalize();
+        if (!target.startsWith(FABRIC_ARCHIVE_BASE_DIR) || !Files.isRegularFile(target) || !isArchiveImage(target)) {
+            throw new ServiceException("Archive file not found");
+        }
+
+        FabricArchiveItemRespVO item = buildArchiveItem(target, normalizedType);
+        if (!getAllowedChipIds().contains(item.getChipId())) {
+            throw new ServiceException("No permission to access this archive file");
+        }
+        return target;
     }
 
     private Set<String> getAllowedChipIds() {
@@ -223,12 +245,19 @@ public class FabricArchiveService {
     }
 
     private FabricArchiveItemRespVO buildArchiveItem(Path path, String type) {
+        return buildArchiveItem(path, type, "/admin/ai/fabric-archive/file");
+    }
+
+    /**
+     * 使用自定义 URL 前缀构建归档项，供 OpsAdminGalleryService 复用。
+     */
+    public FabricArchiveItemRespVO buildArchiveItem(Path path, String type, String urlPrefix) {
         String filename = path.getFileName().toString();
         Map<String, String> parsed = parseArchiveFilename(filename);
 
         FabricArchiveItemRespVO item = new FabricArchiveItemRespVO();
         item.setFilename(filename);
-        item.setUrl(FABRIC_ARCHIVE_BASE_URL + "/" + type + "/" + filename);
+        item.setUrl(urlPrefix + "?type=" + type + "&filename=" + filename);
         item.setType(type);
         item.setChipId(parsed.getOrDefault("chipId", ""));
         item.setCreateTime(parsed.getOrDefault("createTime", ""));

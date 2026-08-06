@@ -213,6 +213,14 @@ public class MainColorServiceImpl implements MainColorService {
 
     /**
      * 根据主色冷暖倾向计算推荐色温
+     *
+     * CIELAB 色相角度：
+     *   0°   = 红色（暖）
+     *   60°  = 黄色（暖）
+     *   120° = 绿色（中性）
+     *   180° = 青色（中性偏冷）
+     *   240° = 蓝色（冷）
+     *   300° = 紫色（冷）
      */
     private int calcRecommendedTemp(int r, int g, int b) {
 
@@ -223,26 +231,44 @@ public class MainColorServiceImpl implements MainColorService {
 
         double chroma = Math.sqrt(a * a + bLab * bLab);
 
-        if (chroma < 8) {
-            return 4500;
-        }
-
         double hue = Math.toDegrees(Math.atan2(bLab, a));
         if (hue < 0) {
             hue += 360;
         }
 
-        double warmCenter = 60.0;
-        double warmScore = Math.cos(Math.toRadians(hue - warmCenter));
+        // 暖色中心：红橙色 (30°)，冷色中心：蓝色 (250°)
+        double warmCenter = 30.0;
+        double coolCenter = 250.0;
 
-        double chromaFactor = Math.min(chroma / 60.0, 1.0);
+        // 计算到暖/冷中心的最短角度距离（0~180°）
+        double distToWarm = angularDistance(hue, warmCenter);
+        double distToCool = angularDistance(hue, coolCenter);
 
-        int baseTemp = 4800;
-        int maxShift = 1200;
+        // warmScore: +1 = 最暖，-1 = 最冷
+        double warmScore = Math.cos(Math.toRadians(distToWarm))
+                         - Math.cos(Math.toRadians(distToCool));
+
+        // 饱和度因子：chroma 越高，冷暖效果越明显
+        // 降低基准值让普通颜色也能产生明显差异
+        double chromaFactor = Math.min(chroma / 25.0, 1.0);
+
+        int baseTemp = 4500;
+        int maxShift = 1800;
 
         int temp = (int) Math.round(baseTemp - maxShift * warmScore * chromaFactor);
 
-        return clamp(temp, 3000, 6500);
+        return clamp(temp, 2700, 6500);
+    }
+
+    /**
+     * 计算两个角度之间的最短距离（0~180°）
+     */
+    private double angularDistance(double a1, double a2) {
+        double diff = Math.abs(a1 - a2);
+        if (diff > 180) {
+            diff = 360 - diff;
+        }
+        return diff;
     }
 
     private MainColorResult defaultResult() {

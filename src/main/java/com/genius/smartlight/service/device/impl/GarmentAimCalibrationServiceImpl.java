@@ -101,12 +101,10 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
     @Override
     public DeviceGarmentAimCalibrationRespVO clearCalibration(String lampChipId) {
         DeviceDO lamp = requireOwnedLamp(lampChipId);
-        lamp.setGarmentAimCalibrationJson(null);
-        lamp.setUpdateTime(LocalDateTime.now());
-        if (deviceMapper.updateById(lamp) != 1) {
-            throw new ServiceException("清空标定数据失败");
-        }
-        return buildResponse(lamp, new CalibrationDocument());
+        CalibrationDocument document = new CalibrationDocument();
+        document.setUpdatedAt(LocalDateTime.now());
+        persist(lamp, document);
+        return buildResponse(lamp, document);
     }
 
     @Override

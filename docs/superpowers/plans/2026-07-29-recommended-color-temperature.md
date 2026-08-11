@@ -70,6 +70,7 @@ class MainColorServiceImplTest {
 
     @ParameterizedTest(name = "pink rgb({0},{1},{2}) stays neutral-slightly-warm")
     @CsvSource({
+            "232, 190, 194",
             "255, 182, 193",
             "255, 192, 203",
             "255, 105, 180",
@@ -178,10 +179,10 @@ In `MainColorServiceImpl`, immediately after `MERGE_DISTANCE`, add:
     private static final double FULL_CHROMA = 50.0;
 
     private static final double[] HUE_ANCHORS = {
-            0.0, 40.0, 75.0, 105.0, 140.0, 200.0, 306.0, 330.0, 360.0
+            0.0, 20.0, 40.0, 75.0, 105.0, 140.0, 200.0, 306.0, 330.0, 360.0
     };
     private static final int[] HUE_TEMP_ANCHORS = {
-            4450, 3600, 3500, 4000, 4400, 5000, 5500, 4900, 4450
+            4450, 4450, 3600, 3500, 4000, 4400, 5000, 5500, 4900, 4450
     };
 ```
 

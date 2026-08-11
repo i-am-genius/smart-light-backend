@@ -19,8 +19,8 @@ import com.genius.smartlight.vo.device.DeviceCamPtzReqVO;
 import com.genius.smartlight.vo.device.DeviceFlowUploadReqVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
 import com.genius.smartlight.vo.device.DeviceStateSyncReqVO;
+import com.genius.smartlight.websocket.DeviceAnnounceNotifier;
 import com.genius.smartlight.websocket.DeviceSessionManager;
-import com.genius.smartlight.websocket.WebSocketPushService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -67,7 +67,7 @@ public class DeviceGatewayController {
     private final DeviceMapper deviceMapper;
     private final StoreMapper storeMapper;
     private final DeviceSessionManager deviceSessionManager;
-    private final WebSocketPushService webSocketPushService;
+    private final DeviceAnnounceNotifier deviceAnnounceNotifier;
     private final ObjectMapper objectMapper;
     private final DeviceControlService deviceControlService;
 
@@ -87,7 +87,7 @@ public class DeviceGatewayController {
 
         // 仅推送给该设备所属店铺的浏览器客户端
         Long storeId = exist != null ? exist.getStoreId() : null;
-        webSocketPushService.pushAnnounce(
+        deviceAnnounceNotifier.pushAsync(
                 reqVO.getChipId(),
                 reqVO.getIp(),
                 reqVO.getDeviceType(),

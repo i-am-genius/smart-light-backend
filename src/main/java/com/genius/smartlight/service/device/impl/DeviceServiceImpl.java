@@ -119,6 +119,9 @@ public class DeviceServiceImpl implements DeviceService {
             exist.setBrightness(reqVO.getBrightness());
             exist.setTemp(reqVO.getTemp());
             exist.setAutoMode(reqVO.getAutoMode());
+            if (reqVO.getGarmentAimEnabled() != null) {
+                exist.setGarmentAimEnabled(reqVO.getGarmentAimEnabled());
+            }
             exist.setRecommendedBrightness(reqVO.getRecommendedBrightness());
             exist.setRecommendedTemp(reqVO.getRecommendedTemp());
             exist.setFabric(reqVO.getFabric());
@@ -169,6 +172,9 @@ public class DeviceServiceImpl implements DeviceService {
         }
 
         DeviceDO updateObj = DeviceConvert.convert(reqVO);
+        if (reqVO.getGarmentAimEnabled() == null) {
+            updateObj.setGarmentAimEnabled(device.getGarmentAimEnabled());
+        }
         updateObj.setId(id);
         updateObj.setCreateTime(device.getCreateTime());
         updateObj.setUpdateTime(LocalDateTime.now());
@@ -394,12 +400,16 @@ public class DeviceServiceImpl implements DeviceService {
         device.setDeviceType(type);
 
         if (!DeviceTypeUtil.isCam(type)) {
+            if (device.getGarmentAimEnabled() == null) {
+                device.setGarmentAimEnabled(false);
+            }
             return;
         }
 
         device.setBrightness(null);
         device.setTemp(null);
         device.setAutoMode(null);
+        device.setGarmentAimEnabled(null);
         device.setRecommendedBrightness(null);
         device.setRecommendedTemp(null);
         device.setFabric(null);

@@ -17,6 +17,7 @@ public class DeviceConvert {
         device.setBrightness(reqVO.getBrightness());
         device.setTemp(reqVO.getTemp());
         device.setAutoMode(reqVO.getAutoMode());
+        device.setGarmentAimEnabled(reqVO.getGarmentAimEnabled());
         device.setRecommendedBrightness(reqVO.getRecommendedBrightness());
         device.setRecommendedTemp(reqVO.getRecommendedTemp());
         device.setFabric(reqVO.getFabric());
@@ -36,6 +37,7 @@ public class DeviceConvert {
         respVO.setBrightness(device.getBrightness());
         respVO.setTemp(device.getTemp());
         respVO.setAutoMode(device.getAutoMode());
+        respVO.setGarmentAimEnabled(device.getGarmentAimEnabled());
         respVO.setRecommendedBrightness(device.getRecommendedBrightness());
         respVO.setRecommendedTemp(device.getRecommendedTemp());
         respVO.setFabric(device.getFabric());

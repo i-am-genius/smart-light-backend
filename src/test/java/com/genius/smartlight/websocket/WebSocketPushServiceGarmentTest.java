@@ -19,7 +19,7 @@ import static org.mockito.Mockito.verify;
 class WebSocketPushServiceGarmentTest {
 
     @Test
-    void browserFabricMessageIncludesGarmentsButDeviceStateDoesNot() throws Exception {
+    void browserMessageIncludesGarmentsAndDeviceGetsOnlyCompactAimTarget() throws Exception {
         WebSocketSessionManager browser = mock(WebSocketSessionManager.class);
         DeviceSessionManager devices = mock(DeviceSessionManager.class);
         ObjectMapper mapper = new ObjectMapper();
@@ -34,11 +34,18 @@ class WebSocketPushServiceGarmentTest {
         part.setCategory("skirt");
         part.setFabric("cotton");
         part.setMainColorRgb("10,20,30");
+        part.setX(160);
+        part.setY(120);
+        part.setW(160);
+        part.setH(240);
         part.setColorSamplePngBase64("secret-base64");
         FabricRecognizeRespVO result = new FabricRecognizeRespVO();
         result.setResultVersion(1);
+        result.setClothDetected(true);
         result.setSegmentationFallback(false);
         result.setOutfitType("lower_only");
+        result.setImageWidth(640);
+        result.setImageHeight(480);
         result.setGarments(List.of(part));
 
         service.pushFabricRecognize("lamp-1", "x.jpg", result, 3L);
@@ -55,11 +62,22 @@ class WebSocketPushServiceGarmentTest {
 
         DeviceRespVO state = new DeviceRespVO();
         state.setChipId("lamp-1");
+        state.setGarmentAimEnabled(true);
+        state.setClothDetected(true);
+        state.setImageWidth(640);
+        state.setImageHeight(480);
         state.setGarments(List.of(part));
         service.pushStateToDevice("lamp-1", state);
 
         ArgumentCaptor<String> deviceJson = ArgumentCaptor.forClass(String.class);
         verify(devices).sendToDevice(eq("lamp-1"), deviceJson.capture());
-        assertThat(mapper.readTree(deviceJson.getValue()).path("data").has("garments")).isFalse();
+        JsonNode devicePayload = mapper.readTree(deviceJson.getValue()).path("data");
+        assertThat(devicePayload.has("garments")).isFalse();
+        assertThat(devicePayload.path("garmentAimEnabled").asBoolean()).isTrue();
+        assertThat(devicePayload.path("garmentTargetValid").asBoolean()).isTrue();
+        assertThat(devicePayload.path("garmentCenterX").asDouble()).isEqualTo(0.375D);
+        assertThat(devicePayload.path("garmentCenterY").asDouble()).isEqualTo(0.5D);
+        assertThat(devicePayload.path("garmentImageWidth").asInt()).isEqualTo(640);
+        assertThat(devicePayload.path("garmentImageHeight").asInt()).isEqualTo(480);
     }
 }

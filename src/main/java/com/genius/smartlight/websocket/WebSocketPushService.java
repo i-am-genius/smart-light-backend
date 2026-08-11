@@ -1,6 +1,7 @@
 package com.genius.smartlight.websocket;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.genius.smartlight.service.ai.GarmentAimTarget;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
 import com.genius.smartlight.vo.ai.PersonDetectRespVO;
@@ -55,10 +56,24 @@ public class WebSocketPushService {
             payload.put("brightness", data.getBrightness());
             payload.put("temp", data.getTemp());
             payload.put("autoMode", data.getAutoMode());
+            payload.put("garmentAimEnabled", Boolean.TRUE.equals(data.getGarmentAimEnabled()));
             payload.put("recommendedBrightness", data.getRecommendedBrightness());
             payload.put("recommendedTemp", data.getRecommendedTemp());
             payload.put("fabric", data.getFabric());
             payload.put("mainColorRgb", data.getMainColorRgb());
+
+            var garmentTarget = GarmentAimTarget.from(data);
+            payload.put("garmentTargetValid", garmentTarget.isPresent());
+            garmentTarget.ifPresent(target -> {
+                payload.put("garmentCenterX", target.centerX());
+                payload.put("garmentCenterY", target.centerY());
+                payload.put("garmentX", target.x());
+                payload.put("garmentY", target.y());
+                payload.put("garmentW", target.w());
+                payload.put("garmentH", target.h());
+                payload.put("garmentImageWidth", target.imageWidth());
+                payload.put("garmentImageHeight", target.imageHeight());
+            });
 
             Map<String, Object> message = new HashMap<>();
             message.put("type", "state");
@@ -111,6 +126,8 @@ public class WebSocketPushService {
         data.put("clothY", result.getClothY());
         data.put("clothW", result.getClothW());
         data.put("clothH", result.getClothH());
+        data.put("imageWidth", result.getImageWidth());
+        data.put("imageHeight", result.getImageHeight());
         data.put("originalImagePath", result.getOriginalImagePath());
         data.put("annotatedImagePath", result.getAnnotatedImagePath());
         data.put("combinedImagePath", result.getCombinedImagePath());

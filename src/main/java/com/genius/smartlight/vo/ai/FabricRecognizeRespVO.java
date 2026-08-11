@@ -39,6 +39,12 @@ public class FabricRecognizeRespVO {
     @Schema(description = "服装检测框高度", example = "520")
     private Integer clothH;
 
+    @Schema(description = "AI 实际处理图宽度；服装坐标基于此尺寸", example = "640")
+    private Integer imageWidth;
+
+    @Schema(description = "AI 实际处理图高度；服装坐标基于此尺寸", example = "480")
+    private Integer imageHeight;
+
     @Schema(description = "服装透明背景 PNG Base64，用于主色提取或前端预览")
     private String clothMaskedPngBase64;
 

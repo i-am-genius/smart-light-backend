@@ -36,6 +36,8 @@ public final class GarmentResultCodec {
             snapshot.setClothDetected(result.getClothDetected());
             snapshot.setSegmentationFallback(result.getSegmentationFallback());
             snapshot.setOutfitType(result.getOutfitType());
+            snapshot.setImageWidth(result.getImageWidth());
+            snapshot.setImageHeight(result.getImageHeight());
             snapshot.setRecognizedAt(recognizedAt);
             snapshot.setGarments(copyGarments(result.getGarments()));
             return MAPPER.writeValueAsString(snapshot);
@@ -72,6 +74,8 @@ public final class GarmentResultCodec {
         response.setClothDetected(snapshot.getClothDetected());
         response.setSegmentationFallback(snapshot.getSegmentationFallback());
         response.setOutfitType(snapshot.getOutfitType());
+        response.setImageWidth(snapshot.getImageWidth());
+        response.setImageHeight(snapshot.getImageHeight());
         response.setGarments(snapshot.getGarments());
     }
 

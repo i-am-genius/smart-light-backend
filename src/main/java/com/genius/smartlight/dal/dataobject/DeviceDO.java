@@ -60,6 +60,9 @@ public class DeviceDO {
     @TableField("garment_result_json")
     private String garmentResultJson;
 
+    @TableField("garment_aim_calibration_json")
+    private String garmentAimCalibrationJson;
+
     @TableField("firmware_version")
     private String firmwareVersion;
 

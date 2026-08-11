@@ -16,6 +16,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 public final class GarmentResultCodec {
 
@@ -49,20 +50,25 @@ public final class GarmentResultCodec {
         }
     }
 
+    public static Optional<GarmentResultSnapshot> decode(String json) {
+        if (!StringUtils.hasText(json)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(MAPPER.readValue(json, GarmentResultSnapshot.class));
+        } catch (Exception exception) {
+            log.warn("服装识别结果反序列化失败: exceptionType={}",
+                    exception.getClass().getSimpleName());
+            return Optional.empty();
+        }
+    }
+
     public static void applyToResponse(DeviceDO device, DeviceRespVO response) {
         String json = device.getGarmentResultJson();
-        if (StringUtils.hasText(json)) {
-            try {
-                GarmentResultSnapshot snapshot =
-                        MAPPER.readValue(json, GarmentResultSnapshot.class);
-                applySnapshot(snapshot, response);
-                return;
-            } catch (Exception exception) {
-                log.warn(
-                        "服装识别结果反序列化失败: deviceId={}, exceptionType={}",
-                        device.getId(),
-                        exception.getClass().getSimpleName());
-            }
+        Optional<GarmentResultSnapshot> snapshot = decode(json);
+        if (snapshot.isPresent()) {
+            applySnapshot(snapshot.get(), response);
+            return;
         }
 
         applyLegacy(device, response);

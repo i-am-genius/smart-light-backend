@@ -3,6 +3,8 @@ package com.genius.smartlight.websocket;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.genius.smartlight.service.device.OtaProgressStore;
+import com.genius.smartlight.service.ai.GarmentAimCalibrationFitter;
+import com.genius.smartlight.service.device.GarmentAimCalibrationService;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
 import com.genius.smartlight.vo.ai.GarmentPartRespVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
@@ -10,11 +12,13 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class WebSocketPushServiceGarmentTest {
 
@@ -22,12 +26,14 @@ class WebSocketPushServiceGarmentTest {
     void browserMessageIncludesGarmentsAndDeviceGetsOnlyCompactAimTarget() throws Exception {
         WebSocketSessionManager browser = mock(WebSocketSessionManager.class);
         DeviceSessionManager devices = mock(DeviceSessionManager.class);
+        GarmentAimCalibrationService calibration = mock(GarmentAimCalibrationService.class);
         ObjectMapper mapper = new ObjectMapper();
         WebSocketPushService service = new WebSocketPushService(
                 browser,
                 mapper,
                 devices,
-                mock(OtaProgressStore.class)
+                mock(OtaProgressStore.class),
+                calibration
         );
         GarmentPartRespVO part = new GarmentPartRespVO();
         part.setPosition("lower");
@@ -67,6 +73,8 @@ class WebSocketPushServiceGarmentTest {
         state.setImageWidth(640);
         state.setImageHeight(480);
         state.setGarments(List.of(part));
+        when(calibration.predict(eq("lamp-1"), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(Optional.of(new GarmentAimCalibrationFitter.Pose(12D, -6D, 180D)));
         service.pushStateToDevice("lamp-1", state);
 
         ArgumentCaptor<String> deviceJson = ArgumentCaptor.forClass(String.class);
@@ -79,5 +87,9 @@ class WebSocketPushServiceGarmentTest {
         assertThat(devicePayload.path("garmentCenterY").asDouble()).isEqualTo(0.5D);
         assertThat(devicePayload.path("garmentImageWidth").asInt()).isEqualTo(640);
         assertThat(devicePayload.path("garmentImageHeight").asInt()).isEqualTo(480);
+        assertThat(devicePayload.path("garmentCalibrationValid").asBoolean()).isTrue();
+        assertThat(devicePayload.path("garmentAimPan").asDouble()).isEqualTo(12D);
+        assertThat(devicePayload.path("garmentAimTilt").asDouble()).isEqualTo(-6D);
+        assertThat(devicePayload.path("garmentAimSlider").asDouble()).isEqualTo(180D);
     }
 }

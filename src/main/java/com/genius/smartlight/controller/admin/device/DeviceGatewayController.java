@@ -57,8 +57,8 @@ public class DeviceGatewayController {
     private static final Set<String> ARM_SPEEDS = Set.of("slow", "normal", "fast");
     private static final Set<String> PTZ_AXES = Set.of("yaw", "pitch", "roll", "all");
     private static final Set<String> PTZ_DIRECTIONS = Set.of("left", "right", "up", "down", "cw", "ccw", "center");
-    private static final float ARM_PAN_MIN = -45f;
-    private static final float ARM_PAN_MAX = 45f;
+    private static final float ARM_PAN_MIN = -90f;
+    private static final float ARM_PAN_MAX = 90f;
     private static final float ARM_TILT_MIN = -90f;
     private static final float ARM_TILT_MAX = 90f;
     private static final float CAM_PITCH_MIN = -90f;

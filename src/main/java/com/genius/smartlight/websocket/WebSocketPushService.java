@@ -1,7 +1,9 @@
 package com.genius.smartlight.websocket;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.genius.smartlight.service.ai.GarmentAimCalibrationFitter;
 import com.genius.smartlight.service.ai.GarmentAimTarget;
+import com.genius.smartlight.service.device.GarmentAimCalibrationService;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
 import com.genius.smartlight.vo.ai.PersonDetectRespVO;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Service;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 @Slf4j
 @Service
@@ -27,6 +30,7 @@ public class WebSocketPushService {
     private final ObjectMapper objectMapper;
     private final DeviceSessionManager deviceSessionManager;
     private final OtaProgressStore otaProgressStore;
+    private final GarmentAimCalibrationService garmentAimCalibrationService;
 
     public void pushState(DeviceRespVO data) {
         long startNs = System.nanoTime();
@@ -64,7 +68,9 @@ public class WebSocketPushService {
 
             var garmentTarget = GarmentAimTarget.from(data);
             payload.put("garmentTargetValid", garmentTarget.isPresent());
-            garmentTarget.ifPresent(target -> {
+            payload.put("garmentCalibrationValid", false);
+            if (garmentTarget.isPresent()) {
+                var target = garmentTarget.get();
                 payload.put("garmentCenterX", target.centerX());
                 payload.put("garmentCenterY", target.centerY());
                 payload.put("garmentX", target.x());
@@ -73,7 +79,18 @@ public class WebSocketPushService {
                 payload.put("garmentH", target.h());
                 payload.put("garmentImageWidth", target.imageWidth());
                 payload.put("garmentImageHeight", target.imageHeight());
-            });
+                Optional<GarmentAimCalibrationFitter.Pose> calibratedPose = Optional.empty();
+                if (Boolean.TRUE.equals(data.getGarmentAimEnabled())) {
+                    calibratedPose = garmentAimCalibrationService.predict(chipId, target);
+                }
+                if (calibratedPose.isPresent()) {
+                    var pose = calibratedPose.get();
+                    payload.put("garmentCalibrationValid", true);
+                    payload.put("garmentAimPan", pose.pan());
+                    payload.put("garmentAimTilt", pose.tilt());
+                    payload.put("garmentAimSlider", pose.slider());
+                }
+            }
 
             Map<String, Object> message = new HashMap<>();
             message.put("type", "state");

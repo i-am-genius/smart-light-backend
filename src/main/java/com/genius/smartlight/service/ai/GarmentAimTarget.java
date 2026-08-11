@@ -1,6 +1,7 @@
 package com.genius.smartlight.service.ai;
 
 import com.genius.smartlight.vo.ai.GarmentPartRespVO;
+import com.genius.smartlight.vo.ai.GarmentResultSnapshot;
 import com.genius.smartlight.vo.device.DeviceRespVO;
 
 import java.util.List;
@@ -20,13 +21,40 @@ public record GarmentAimTarget(
         double centerY) {
 
     public static Optional<GarmentAimTarget> from(DeviceRespVO state) {
-        if (state == null || !Boolean.TRUE.equals(state.getClothDetected())) {
+        if (state == null) {
             return Optional.empty();
         }
 
-        Integer imageWidth = state.getImageWidth();
-        Integer imageHeight = state.getImageHeight();
-        List<GarmentPartRespVO> garments = state.getGarments();
+        return from(
+                state.getClothDetected(),
+                state.getImageWidth(),
+                state.getImageHeight(),
+                state.getGarments()
+        );
+    }
+
+    public static Optional<GarmentAimTarget> from(GarmentResultSnapshot snapshot) {
+        if (snapshot == null) {
+            return Optional.empty();
+        }
+
+        return from(
+                snapshot.getClothDetected(),
+                snapshot.getImageWidth(),
+                snapshot.getImageHeight(),
+                snapshot.getGarments()
+        );
+    }
+
+    private static Optional<GarmentAimTarget> from(
+            Boolean clothDetected,
+            Integer imageWidth,
+            Integer imageHeight,
+            List<GarmentPartRespVO> garments) {
+        if (!Boolean.TRUE.equals(clothDetected)) {
+            return Optional.empty();
+        }
+
         if (imageWidth == null || imageWidth <= 0
                 || imageHeight == null || imageHeight <= 0
                 || garments == null || garments.isEmpty()) {

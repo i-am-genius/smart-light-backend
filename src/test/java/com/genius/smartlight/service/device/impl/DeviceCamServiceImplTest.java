@@ -236,6 +236,38 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
+    void createCaptureTask_withoutTargetIndex_resolvesCameraPresetFromSelectedLamp() throws Exception {
+        configureManualTrackingDevices(true, false, "192.168.1.88");
+        writeManualCaptureConfig(2);
+
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId(MANUAL_CAM_CHIP_ID);
+        request.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+
+        DeviceCamCaptureTaskRespVO result = service.createCaptureTask(request);
+
+        assertThat(result.getTargetIndex()).isEqualTo(2);
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager).sendToDevice(eq(MANUAL_CAM_CHIP_ID), payloadCaptor.capture());
+        JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
+        assertThat(payload.path("targetChipId").asText()).isEqualTo(MANUAL_LAMP_CHIP_ID);
+        assertThat(payload.path("targetIndex").asInt()).isEqualTo(2);
+        assertThat(payload.path("capturePreset").path("slider").asDouble()).isEqualTo(600.0);
+    }
+
+    @Test
+    void createCaptureTask_withoutTargetIndex_rejectsLampWithoutCameraPreset() {
+        configureManualTrackingDevices(true, false, "192.168.1.88");
+
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId(MANUAL_CAM_CHIP_ID);
+        request.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+
+        assertThatThrownBy(() -> service.createCaptureTask(request))
+                .hasMessageContaining("Camera 拍摄预设");
+    }
+
+    @Test
     void cameraStartTrackingCommand_usesHttpWithoutPortOrLegacyTuningFields() throws Exception {
         DeviceCamPresetVO preset = new DeviceCamPresetVO();
         preset.setPan(-20.0);
@@ -360,6 +392,26 @@ class DeviceCamServiceImplTest {
         config.setConfigured(true);
         config.setRois(List.of(roi));
         config.setTrackingPresets(Map.of("1", preset));
+
+        Path path = manualConfigPath();
+        Files.createDirectories(path.getParent());
+        objectMapper.writeValue(path.toFile(), config);
+    }
+
+    private void writeManualCaptureConfig(int targetIndex) throws Exception {
+        DeviceCamRoiItemVO target = new DeviceCamRoiItemVO();
+        target.setTargetIndex(targetIndex);
+        target.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+
+        DeviceCamPresetVO preset = new DeviceCamPresetVO();
+        preset.setPan(0.0);
+        preset.setTilt(0.0);
+        preset.setSlider(600.0);
+
+        DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
+        config.setCamChipId(MANUAL_CAM_CHIP_ID);
+        config.setRois(List.of(target));
+        config.setCapturePresets(Map.of(String.valueOf(targetIndex), preset));
 
         Path path = manualConfigPath();
         Files.createDirectories(path.getParent());

@@ -23,6 +23,19 @@ public class MainColorServiceImpl implements MainColorService {
     private static final double BANDWIDTH_SQUARE = BANDWIDTH * BANDWIDTH;
     private static final double MERGE_DISTANCE = 6.0;
 
+    private static final int BASE_RECOMMENDED_TEMP = 4200;
+    private static final int MIN_RECOMMENDED_TEMP = 3500;
+    private static final int MAX_RECOMMENDED_TEMP = 5500;
+    private static final double NEUTRAL_CHROMA = 8.0;
+    private static final double FULL_CHROMA = 50.0;
+
+    private static final double[] HUE_ANCHORS = {
+            0.0, 20.0, 40.0, 75.0, 105.0, 140.0, 200.0, 306.0, 330.0, 360.0
+    };
+    private static final int[] HUE_TEMP_ANCHORS = {
+            4450, 4450, 3600, 3500, 4000, 4400, 5000, 5500, 4900, 4450
+    };
+
     @Override
     public MainColorResult extract(InputStream inputStream) {
         try {
@@ -212,23 +225,13 @@ public class MainColorServiceImpl implements MainColorService {
     }
 
     /**
-     * 根据主色冷暖倾向计算推荐色温
-     *
-     * CIELAB 色相角度：
-     *   0°   = 红色（暖）
-     *   60°  = 黄色（暖）
-     *   120° = 绿色（中性）
-     *   180° = 青色（中性偏冷）
-     *   240° = 蓝色（冷）
-     *   300° = 紫色（冷）
+     * 根据主色的 CIELAB 色相和色度计算推荐色温。
+     * 低色度颜色回归中性基准，高色度颜色平滑靠近对应色相锚点。
      */
     private int calcRecommendedTemp(int r, int g, int b) {
-
         double[] lab = rgbToLab(r, g, b);
-
         double a = lab[1];
         double bLab = lab[2];
-
         double chroma = Math.sqrt(a * a + bLab * bLab);
 
         double hue = Math.toDegrees(Math.atan2(bLab, a));
@@ -236,39 +239,39 @@ public class MainColorServiceImpl implements MainColorService {
             hue += 360;
         }
 
-        // 暖色中心：红橙色 (30°)，冷色中心：蓝色 (250°)
-        double warmCenter = 30.0;
-        double coolCenter = 250.0;
+        double hueTemp = interpolateHueTemp(hue);
+        double chromaFactor = calcChromaFactor(chroma);
+        int temp = (int) Math.round(
+                BASE_RECOMMENDED_TEMP
+                        + chromaFactor * (hueTemp - BASE_RECOMMENDED_TEMP)
+        );
 
-        // 计算到暖/冷中心的最短角度距离（0~180°）
-        double distToWarm = angularDistance(hue, warmCenter);
-        double distToCool = angularDistance(hue, coolCenter);
-
-        // warmScore: +1 = 最暖，-1 = 最冷
-        double warmScore = Math.cos(Math.toRadians(distToWarm))
-                         - Math.cos(Math.toRadians(distToCool));
-
-        // 饱和度因子：chroma 越高，冷暖效果越明显
-        // 降低基准值让普通颜色也能产生明显差异
-        double chromaFactor = Math.min(chroma / 25.0, 1.0);
-
-        int baseTemp = 4500;
-        int maxShift = 1800;
-
-        int temp = (int) Math.round(baseTemp - maxShift * warmScore * chromaFactor);
-
-        return clamp(temp, 2700, 6500);
+        return clamp(temp, MIN_RECOMMENDED_TEMP, MAX_RECOMMENDED_TEMP);
     }
 
-    /**
-     * 计算两个角度之间的最短距离（0~180°）
-     */
-    private double angularDistance(double a1, double a2) {
-        double diff = Math.abs(a1 - a2);
-        if (diff > 180) {
-            diff = 360 - diff;
+    private double interpolateHueTemp(double hue) {
+        for (int i = 1; i < HUE_ANCHORS.length; i++) {
+            if (hue <= HUE_ANCHORS[i]) {
+                double startHue = HUE_ANCHORS[i - 1];
+                double endHue = HUE_ANCHORS[i];
+                double ratio = (hue - startHue) / (endHue - startHue);
+                return HUE_TEMP_ANCHORS[i - 1]
+                        + ratio * (HUE_TEMP_ANCHORS[i] - HUE_TEMP_ANCHORS[i - 1]);
+            }
         }
-        return diff;
+        return HUE_TEMP_ANCHORS[0];
+    }
+
+    private double calcChromaFactor(double chroma) {
+        if (chroma <= NEUTRAL_CHROMA) {
+            return 0;
+        }
+        if (chroma >= FULL_CHROMA) {
+            return 1;
+        }
+
+        double x = (chroma - NEUTRAL_CHROMA) / (FULL_CHROMA - NEUTRAL_CHROMA);
+        return x * x * (3 - 2 * x);
     }
 
     private MainColorResult defaultResult() {

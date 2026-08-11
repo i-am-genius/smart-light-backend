@@ -42,6 +42,9 @@ public class DeviceDO {
     @TableField("auto_mode")
     private Boolean autoMode;
 
+    @TableField("garment_aim_enabled")
+    private Boolean garmentAimEnabled;
+
     @TableField("recommended_brightness")
     private Integer recommendedBrightness;
 

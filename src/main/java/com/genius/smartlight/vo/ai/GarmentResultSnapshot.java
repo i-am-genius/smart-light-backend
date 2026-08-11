@@ -12,6 +12,8 @@ public class GarmentResultSnapshot {
     private Boolean clothDetected;
     private Boolean segmentationFallback;
     private String outfitType;
+    private Integer imageWidth;
+    private Integer imageHeight;
     private LocalDateTime recognizedAt;
     private List<GarmentPartRespVO> garments;
 }

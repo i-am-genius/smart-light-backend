@@ -12,7 +12,7 @@ import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.device.DeviceRespVO;
 import com.genius.smartlight.vo.device.DeviceStateReportReqVO;
 import com.genius.smartlight.websocket.DeviceSessionManager;
-import com.genius.smartlight.websocket.WebSocketPushService;
+import com.genius.smartlight.websocket.DeviceStateNotifier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -29,7 +29,7 @@ import java.util.Map;
 public class DeviceReportServiceImpl implements DeviceReportService {
 
     private final DeviceMapper deviceMapper;
-    private final WebSocketPushService webSocketPushService;
+    private final DeviceStateNotifier deviceStateNotifier;
     private final DeviceSessionManager deviceSessionManager;
     private final OtaProgressStore otaProgressStore;
     private final ObjectMapper objectMapper;
@@ -110,8 +110,8 @@ public class DeviceReportServiceImpl implements DeviceReportService {
         logPerf(chipId, "convert", stepStartNs);
 
         stepStartNs = System.nanoTime();
-        webSocketPushService.pushState(respVO);
-        logPerf(chipId, "pushWs", stepStartNs);
+        deviceStateNotifier.pushAsync(respVO);
+        logPerf(chipId, "queueWs", stepStartNs);
         log.debug("[STATE-REPORT-PERF] chipId={} total={}ms", chipId, elapsedMs(totalStartNs));
     }
 

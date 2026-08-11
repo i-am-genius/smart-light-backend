@@ -43,6 +43,9 @@ public class DeviceRespVO {
     @Schema(description = "是否开启自动模式", example = "true")
     private Boolean autoMode;
 
+    @Schema(description = "是否根据最新服装坐标调整照射位置；false 使用默认服装预设", example = "false")
+    private Boolean garmentAimEnabled;
+
     @Schema(description = "AI 推荐亮度，范围通常为 0-100", example = "75")
     private Integer recommendedBrightness;
 
@@ -62,6 +65,10 @@ public class DeviceRespVO {
     private Boolean segmentationFallback;
 
     private String outfitType;
+
+    private Integer imageWidth;
+
+    private Integer imageHeight;
 
     private List<GarmentPartRespVO> garments;
 

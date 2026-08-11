@@ -337,12 +337,17 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
         String targetChipId = resolveTargetChipId(cam.getChipId(), reqVO.getTargetIndex(), reqVO.getTargetChipId());
         DeviceDO target = requireLampLikeForCurrentStore(targetChipId);
+        int targetIndex = resolveCaptureTargetIndex(
+                cam.getChipId(),
+                reqVO.getTargetIndex(),
+                target.getChipId()
+        );
 
         DeviceCamCaptureTaskRespVO task = new DeviceCamCaptureTaskRespVO();
         task.setTaskId(UUID.randomUUID().toString());
         task.setCamChipId(cam.getChipId());
         task.setTargetChipId(target.getChipId());
-        task.setTargetIndex(normalizeTargetIndex(reqVO.getTargetIndex()));
+        task.setTargetIndex(targetIndex);
         task.setStatus("created");
         task.setMessage("capture task created");
         task.setCreateTime(LocalDateTime.now());
@@ -990,6 +995,27 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 .filter(this::notBlank)
                 .findFirst()
                 .orElseThrow(() -> new ServiceException("目标灯缺失，请先完成 ROI 标定"));
+    }
+
+    private int resolveCaptureTargetIndex(
+            String camChipId,
+            Integer requestedTargetIndex,
+            String targetChipId) {
+        List<CameraCapturePresetResolver.TargetBinding> bindings =
+                readRoiConfig(camChipId).getRois().stream()
+                        .map(roi -> new CameraCapturePresetResolver.TargetBinding(
+                                roi.getTargetIndex(),
+                                roi.getTargetChipId()
+                        ))
+                        .toList();
+        return CameraCapturePresetResolver.resolve(
+                        requestedTargetIndex,
+                        targetChipId,
+                        bindings
+                )
+                .orElseThrow(() -> new ServiceException(
+                        "未配置所选 Lamp 的 Camera 拍摄预设，请先在 Camera 详情中绑定目标灯并设置拍摄预设"
+                ));
     }
 
     private DeviceDO requireCamForCurrentStore(String chipId) {

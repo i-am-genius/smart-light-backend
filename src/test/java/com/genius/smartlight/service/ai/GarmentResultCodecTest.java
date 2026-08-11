@@ -39,6 +39,8 @@ class GarmentResultCodecTest {
         assertThat(response.getClothDetected()).isFalse();
         assertThat(response.getSegmentationFallback()).isTrue();
         assertThat(response.getOutfitType()).isEqualTo("upper_only");
+        assertThat(response.getImageWidth()).isEqualTo(640);
+        assertThat(response.getImageHeight()).isEqualTo(480);
         assertThat(response.getGarments()).singleElement().satisfies(part -> {
             assertThat(part.getPosition()).isEqualTo("upper");
             assertThat(part.getCategory()).isEqualTo("shirt");
@@ -166,6 +168,8 @@ class GarmentResultCodecTest {
         result.setClothDetected(false);
         result.setSegmentationFallback(true);
         result.setOutfitType("upper_only");
+        result.setImageWidth(640);
+        result.setImageHeight(480);
         result.setGarments(List.of(part));
         return result;
     }

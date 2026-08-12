@@ -1,6 +1,7 @@
 package com.genius.smartlight.service.analytics.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.dataobject.PersonFlowRecordDO;
 import com.genius.smartlight.dal.dataobject.StoreDO;
@@ -74,7 +75,17 @@ public class AnalyticsServiceImpl implements AnalyticsService {
 
     @Override
     public StrategyCompareRespVO getStrategyCompare(String chipId) {
-        return new StrategyCompareRespVO();
+        Long storeId = resolveStoreId(chipId);
+        if (storeId == null) {
+            return EnergySavingEstimateCalculator.empty("暂无可用于估算的门店数据");
+        }
+
+        List<DeviceDO> lampDevices = deviceMapper.selectList(
+                new LambdaQueryWrapper<DeviceDO>()
+                        .eq(DeviceDO::getStoreId, storeId)
+        ).stream().filter(device -> DeviceTypeUtil.isLampLike(device.getDeviceType())).toList();
+
+        return EnergySavingEstimateCalculator.calculate(lampDevices);
     }
 
     private Long resolveStoreId(String chipId) {

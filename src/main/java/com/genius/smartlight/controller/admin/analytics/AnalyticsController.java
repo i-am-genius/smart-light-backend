@@ -29,10 +29,10 @@ public class AnalyticsController {
         return CommonResult.success(analyticsService.getTempPeopleTrend(chipId));
     }
 
-    @Operation(summary = "查询固定策略与智能策略对比")
+    @Operation(summary = "查询今日预计节能效果")
     @GetMapping("/strategy-compare")
     public CommonResult<StrategyCompareRespVO> getStrategyCompare(
-            @Parameter(description = "设备 chipId，当前版本暂不使用")
+            @Parameter(description = "可选设备 chipId，用于定位当前门店")
             @RequestParam(required = false) String chipId) {
         return CommonResult.success(analyticsService.getStrategyCompare(chipId));
     }

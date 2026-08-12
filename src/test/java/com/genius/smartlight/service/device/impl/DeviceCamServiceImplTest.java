@@ -15,6 +15,7 @@ import com.genius.smartlight.vo.device.DeviceCamPresetVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiItemVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
+import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
 import com.genius.smartlight.websocket.DeviceSessionManager;
 import com.genius.smartlight.websocket.WebSocketPushService;
@@ -34,9 +35,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 class DeviceCamServiceImplTest {
 
@@ -95,13 +99,46 @@ class DeviceCamServiceImplTest {
         DeviceTrackingStatusRespVO result = service.startTrackingManually(manualTrackingRequest(1));
 
         assertThat(result.getTrackingStatus()).isEqualTo("tracking");
+        InOrder commandOrder = inOrder(deviceSessionManager);
+        ArgumentCaptor<String> lampPayloadCaptor = ArgumentCaptor.forClass(String.class);
+        commandOrder.verify(deviceSessionManager)
+                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), lampPayloadCaptor.capture());
+        JsonNode lampCommand = objectMapper.readTree(lampPayloadCaptor.getValue());
+        assertThat(lampCommand.path("type").asText()).isEqualTo("lampTrackingStart");
+        assertThat(lampCommand.path("camChipId").asText()).isEqualTo(MANUAL_CAM_CHIP_ID);
+
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager).sendToDevice(eq(MANUAL_CAM_CHIP_ID), payloadCaptor.capture());
+        commandOrder.verify(deviceSessionManager)
+                .sendToDevice(eq(MANUAL_CAM_CHIP_ID), payloadCaptor.capture());
         JsonNode command = objectMapper.readTree(payloadCaptor.getValue());
         assertThat(command.path("type").asText()).isEqualTo("cameraStartTracking");
         assertThat(command.path("targetIndex").asInt()).isEqualTo(1);
         assertThat(command.path("targetChipId").asText()).isEqualTo(MANUAL_LAMP_CHIP_ID);
         assertThat(command.path("lampIp").asText()).isEqualTo("192.168.1.88");
+    }
+
+    @Test
+    void terminalCameraStatus_releasesLampBackToGarmentOrDefaultAim() throws Exception {
+        configureManualTrackingDevices(true, true, "192.168.1.88");
+        writeManualTrackingConfig();
+        service.startTrackingManually(manualTrackingRequest(1));
+
+        DeviceTrackingStatusReqVO status = new DeviceTrackingStatusReqVO();
+        status.setChipId(MANUAL_CAM_CHIP_ID);
+        status.setRole("cam");
+        status.setTrackingStatus("lost");
+        status.setCamChipId(MANUAL_CAM_CHIP_ID);
+        status.setLampChipId(MANUAL_LAMP_CHIP_ID);
+        status.setTargetIndex(1);
+        service.reportTrackingStatus(status);
+
+        ArgumentCaptor<String> lampPayloads = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager, times(2))
+                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), lampPayloads.capture());
+        assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(0)).path("type").asText())
+                .isEqualTo("lampTrackingStart");
+        assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(1)).path("type").asText())
+                .isEqualTo("lampTrackingStop");
     }
 
     @Test

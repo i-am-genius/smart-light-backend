@@ -171,12 +171,28 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
             if (document.getSamples() == null) {
                 document.setSamples(new ArrayList<>());
             }
+            migrateLegacySamples(document);
             return document;
         } catch (Exception exception) {
             log.warn("garment aim calibration decode failed, chipId={}, exceptionType={}",
                     lamp.getChipId(), exception.getClass().getSimpleName());
             return new CalibrationDocument();
         }
+    }
+
+    static void migrateLegacySamples(CalibrationDocument document) {
+        if (document == null || document.getSamples() == null) {
+            return;
+        }
+        document.getSamples().forEach(sample -> {
+            if (sample.getPanOffset() == null && sample.getPan() != null) {
+                sample.setPanOffset(sample.getPan() - LEGACY_DEFAULT_PAN);
+            }
+            if (sample.getTiltOffset() == null && sample.getTilt() != null) {
+                sample.setTiltOffset(sample.getTilt() - LEGACY_DEFAULT_TILT);
+            }
+        });
+        document.setVersion(DOCUMENT_VERSION);
     }
 
     private void persist(DeviceDO lamp, CalibrationDocument document) {

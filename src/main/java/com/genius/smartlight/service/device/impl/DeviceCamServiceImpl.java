@@ -317,6 +317,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
 
         activeTrackingByCam.remove(cam.getChipId());
+        sendLampTrackingStop(lamp.getChipId(), cam.getChipId(), "manual tracking stopped");
         sendCameraReturnCenter(cam, "manual tracking stopped");
 
         TrackingCandidate candidate = trackingCandidate(cam.getChipId(), lamp.getChipId(), targetIndex);
@@ -559,7 +560,11 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             String camChipId = notBlank(resp.getCamChipId()) ? resp.getCamChipId() :
                     ("cam".equals(resp.getRole()) ? resp.getChipId() : null);
             if (notBlank(camChipId)) {
-                activeTrackingByCam.remove(camChipId);
+                String active = activeTrackingByCam.remove(camChipId);
+                String lampChipId = notBlank(resp.getLampChipId())
+                        ? resp.getLampChipId()
+                        : lampChipIdFromActive(active);
+                sendLampTrackingStop(lampChipId, camChipId, "tracking " + resp.getTrackingStatus());
             }
         }
         trackingCache.put(device.getChipId(), resp);
@@ -749,8 +754,16 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 lampIp,
                 resolvePreset(config.getTrackingPresets(), candidate.targetIndex)
         );
+        if (!sendLampTrackingStart(lamp.getChipId(), cam.getChipId(), candidate.targetIndex)) {
+            pushTracking(candidate, "error", "lamp tracking lock command send failed", cam.getStoreId());
+            return;
+        }
         if (!deviceSessionManager.sendToDevice(cam.getChipId(), camCommand)) {
-            stopTrackingIfActive(candidate.camChipId, "camera tracking command send failed");
+            sendLampTrackingStop(
+                    lamp.getChipId(),
+                    cam.getChipId(),
+                    "camera tracking command send failed"
+            );
             pushTracking(candidate, "error", "camera tracking command send failed", cam.getStoreId());
             return;
         }
@@ -791,6 +804,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         int targetIndex = parts.length > 1 ? normalizeTargetIndex(parseInt(parts[1])) : 1;
 
         DeviceDO cam = requireCam(camChipId);
+        sendLampTrackingStop(lampChipId, cam.getChipId(), reason);
         if (deviceSessionManager.isOnline(cam.getChipId())) {
             sendCameraReturnCenter(cam, reason);
         }
@@ -813,6 +827,42 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         command.put("camChipId", cam.getChipId());
         command.put("reason", reason);
         deviceSessionManager.sendToDevice(cam.getChipId(), command.toString());
+    }
+
+    private boolean sendLampTrackingStart(String lampChipId, String camChipId, Integer targetIndex) {
+        if (!notBlank(lampChipId)) {
+            return false;
+        }
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("type", "lampTrackingStart");
+        command.put("lampChipId", lampChipId);
+        command.put("camChipId", camChipId);
+        command.put("targetIndex", normalizeTargetIndex(targetIndex));
+        return deviceSessionManager.sendToDevice(lampChipId, command.toString());
+    }
+
+    private void sendLampTrackingStop(String lampChipId, String camChipId, String reason) {
+        if (!notBlank(lampChipId)) {
+            return;
+        }
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("type", "lampTrackingStop");
+        command.put("lampChipId", lampChipId);
+        if (notBlank(camChipId)) {
+            command.put("camChipId", camChipId);
+        }
+        command.put("reason", defaultStatus(reason, "tracking stopped"));
+        if (!deviceSessionManager.sendToDevice(lampChipId, command.toString())) {
+            log.warn("lamp tracking stop command send failed, lampChipId={}, camChipId={}, reason={}",
+                    lampChipId, camChipId, reason);
+        }
+    }
+
+    private String lampChipIdFromActive(String active) {
+        if (!notBlank(active)) {
+            return null;
+        }
+        return active.split("#", 2)[0];
     }
 
     private void pushTracking(TrackingCandidate candidate, String status, String message, Long storeId) {

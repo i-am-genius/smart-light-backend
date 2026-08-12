@@ -22,7 +22,6 @@ public class DeviceGarmentAimCalibrationRespVO {
     private Double verticalCoverage;
     private Double rmsePan;
     private Double rmseTilt;
-    private Double rmseSlider;
     private Boolean currentTargetValid;
     private Boolean currentTargetSampled;
     private Double currentCenterX;
@@ -30,7 +29,6 @@ public class DeviceGarmentAimCalibrationRespVO {
     private LocalDateTime currentRecognizedAt;
     private Double suggestedPan;
     private Double suggestedTilt;
-    private Double suggestedSlider;
     private String suggestionSource;
     private LocalDateTime updatedAt;
     private List<Sample> samples = new ArrayList<>();
@@ -42,7 +40,6 @@ public class DeviceGarmentAimCalibrationRespVO {
         private Double centerY;
         private Double pan;
         private Double tilt;
-        private Double slider;
         private LocalDateTime recognizedAt;
         private LocalDateTime createdAt;
     }

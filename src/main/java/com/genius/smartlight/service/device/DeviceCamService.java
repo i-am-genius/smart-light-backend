@@ -10,6 +10,7 @@ import com.genius.smartlight.vo.device.DeviceCamStatusRespVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
 import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
 import com.genius.smartlight.vo.device.DeviceLampClothStateRespVO;
+import com.genius.smartlight.vo.device.DeviceSliderStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
 import org.springframework.core.io.Resource;
@@ -35,6 +36,8 @@ public interface DeviceCamService {
     DeviceTrackingStatusRespVO stopTrackingManually(DeviceCamTrackingControlReqVO reqVO);
 
     DeviceCamCaptureTaskRespVO createCaptureTask(DeviceCamCaptureTaskReqVO reqVO);
+
+    void reportSliderStatus(DeviceSliderStatusReqVO reqVO);
 
     DeviceCamCaptureTaskRespVO uploadCapturePhoto(String taskId, MultipartFile file);
 

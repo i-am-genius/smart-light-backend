@@ -69,12 +69,16 @@ class WebSocketPushServiceGarmentTest {
         DeviceRespVO state = new DeviceRespVO();
         state.setChipId("lamp-1");
         state.setGarmentAimEnabled(true);
+        state.setGarmentDefaultPan(3D);
+        state.setGarmentDefaultTilt(18D);
+        state.setPersonDefaultPan(-4D);
+        state.setPersonDefaultTilt(-28D);
         state.setClothDetected(true);
         state.setImageWidth(640);
         state.setImageHeight(480);
         state.setGarments(List.of(part));
         when(calibration.predict(eq("lamp-1"), org.mockito.ArgumentMatchers.any()))
-                .thenReturn(Optional.of(new GarmentAimCalibrationFitter.Pose(12D, -6D, 180D)));
+                .thenReturn(Optional.of(new GarmentAimCalibrationFitter.Pose(12D, -6D)));
         service.pushStateToDevice("lamp-1", state);
 
         ArgumentCaptor<String> deviceJson = ArgumentCaptor.forClass(String.class);
@@ -82,6 +86,10 @@ class WebSocketPushServiceGarmentTest {
         JsonNode devicePayload = mapper.readTree(deviceJson.getValue()).path("data");
         assertThat(devicePayload.has("garments")).isFalse();
         assertThat(devicePayload.path("garmentAimEnabled").asBoolean()).isTrue();
+        assertThat(devicePayload.path("garmentDefaultPan").asDouble()).isEqualTo(3D);
+        assertThat(devicePayload.path("garmentDefaultTilt").asDouble()).isEqualTo(18D);
+        assertThat(devicePayload.path("personDefaultPan").asDouble()).isEqualTo(-4D);
+        assertThat(devicePayload.path("personDefaultTilt").asDouble()).isEqualTo(-28D);
         assertThat(devicePayload.path("garmentTargetValid").asBoolean()).isTrue();
         assertThat(devicePayload.path("garmentCenterX").asDouble()).isEqualTo(0.375D);
         assertThat(devicePayload.path("garmentCenterY").asDouble()).isEqualTo(0.5D);
@@ -90,6 +98,6 @@ class WebSocketPushServiceGarmentTest {
         assertThat(devicePayload.path("garmentCalibrationValid").asBoolean()).isTrue();
         assertThat(devicePayload.path("garmentAimPan").asDouble()).isEqualTo(12D);
         assertThat(devicePayload.path("garmentAimTilt").asDouble()).isEqualTo(-6D);
-        assertThat(devicePayload.path("garmentAimSlider").asDouble()).isEqualTo(180D);
+        assertThat(devicePayload.has("garmentAimSlider")).isFalse();
     }
 }

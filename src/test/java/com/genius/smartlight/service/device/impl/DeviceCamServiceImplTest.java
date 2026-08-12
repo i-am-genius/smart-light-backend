@@ -11,10 +11,10 @@ import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
-import com.genius.smartlight.vo.device.DeviceCamPresetVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiItemVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
+import com.genius.smartlight.vo.device.DeviceSliderStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
 import com.genius.smartlight.websocket.DeviceSessionManager;
@@ -46,6 +46,7 @@ class DeviceCamServiceImplTest {
 
     private static final String MANUAL_CAM_CHIP_ID = "CAM-MANUAL-TRACKING-TEST";
     private static final String MANUAL_LAMP_CHIP_ID = "LAMP-MANUAL-TRACKING-TEST";
+    private static final String SLIDER_LAMP_CHIP_ID = "LAMP-SLIDER-TEST";
 
     private DeviceMapper deviceMapper;
     private CurrentStoreService currentStoreService;
@@ -74,11 +75,16 @@ class DeviceCamServiceImplTest {
 
         DeviceDO cam = device("CAM-001", "cam");
         DeviceDO lamp = device("LAMP-001", "lamp");
-        when(deviceMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(cam, lamp);
+        DeviceDO sliderLamp = device(SLIDER_LAMP_CHIP_ID, "lamp");
+        stubDevices(cam, lamp, sliderLamp);
         when(currentStoreService.getCurrentStoreId()).thenReturn(1L);
         when(deviceSessionManager.isOnline("CAM-001")).thenReturn(true);
-        when(deviceSessionManager.isOnline("LAMP-001")).thenReturn(false);
+        when(deviceSessionManager.isOnline("LAMP-001")).thenReturn(true);
+        when(deviceSessionManager.isOnline(SLIDER_LAMP_CHIP_ID)).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq("CAM-001"), any(String.class))).thenReturn(true);
+        when(deviceSessionManager.sendToDevice(eq("LAMP-001"), any(String.class))).thenReturn(true);
+        when(deviceSessionManager.sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class))).thenReturn(true);
+        writeDefaultCaptureConfig();
     }
 
     @AfterEach
@@ -86,6 +92,7 @@ class DeviceCamServiceImplTest {
         service.shutdownCaptureTimeoutExecutor();
         try {
             Files.deleteIfExists(manualConfigPath());
+            Files.deleteIfExists(defaultConfigPath());
         } catch (Exception ignored) {
             // The unique test config must not mask the assertion result during cleanup.
         }
@@ -100,6 +107,14 @@ class DeviceCamServiceImplTest {
 
         assertThat(result.getTrackingStatus()).isEqualTo("tracking");
         InOrder commandOrder = inOrder(deviceSessionManager);
+        ArgumentCaptor<String> sliderPayloadCaptor = ArgumentCaptor.forClass(String.class);
+        commandOrder.verify(deviceSessionManager)
+                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), sliderPayloadCaptor.capture());
+        JsonNode sliderCommand = objectMapper.readTree(sliderPayloadCaptor.getValue());
+        assertThat(sliderCommand.path("type").asText()).isEqualTo("arm_position");
+        assertThat(sliderCommand.path("source").asText()).isEqualTo("camera_tracking");
+        assertThat(sliderCommand.path("slider").asDouble()).isEqualTo(600.0);
+
         ArgumentCaptor<String> lampPayloadCaptor = ArgumentCaptor.forClass(String.class);
         commandOrder.verify(deviceSessionManager)
                 .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), lampPayloadCaptor.capture());
@@ -133,11 +148,13 @@ class DeviceCamServiceImplTest {
         service.reportTrackingStatus(status);
 
         ArgumentCaptor<String> lampPayloads = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager, times(2))
+        verify(deviceSessionManager, times(3))
                 .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), lampPayloads.capture());
         assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(0)).path("type").asText())
-                .isEqualTo("lampTrackingStart");
+                .isEqualTo("arm_position");
         assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(1)).path("type").asText())
+                .isEqualTo("lampTrackingStart");
+        assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(2)).path("type").asText())
                 .isEqualTo("lampTrackingStop");
     }
 
@@ -171,29 +188,36 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void createCaptureTask_allowsOfflineTargetLamp() {
+    void createCaptureTask_rejectsOfflineSliderController() {
+        when(deviceSessionManager.isOnline(SLIDER_LAMP_CHIP_ID)).thenReturn(false);
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId("CAM-001");
         request.setTargetChipId("LAMP-001");
         request.setTargetIndex(1);
 
-        DeviceCamCaptureTaskRespVO result = service.createCaptureTask(request);
-
-        assertThat(result.getCamChipId()).isEqualTo("CAM-001");
-        assertThat(result.getTargetChipId()).isEqualTo("LAMP-001");
-        assertThat(result.getStatus()).isEqualTo("created");
-        verify(deviceSessionManager).isOnline("CAM-001");
-        verify(deviceSessionManager, never()).isOnline("LAMP-001");
-        verify(deviceSessionManager).sendToDevice(eq("CAM-001"), any(String.class));
+        assertThatThrownBy(() -> service.createCaptureTask(request))
+                .hasMessageContaining("滑轨控制灯离线");
+        verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any(String.class));
+        verify(deviceSessionManager, never()).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
     }
 
     @Test
-    void roiContract_usesPanTiltSliderAndOmitsRemovedFields() throws Exception {
-        DeviceCamPresetVO preset = new DeviceCamPresetVO();
-        preset.setPan(10.0);
-        preset.setTilt(-5.0);
-        preset.setSlider(320.0);
+    void createCaptureTask_allowsOfflineTargetWhenSliderControllerIsOnline() {
+        when(deviceSessionManager.isOnline("LAMP-001")).thenReturn(false);
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
 
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+
+        assertThat(task.getStatus()).isEqualTo("waiting_motion");
+        verify(deviceSessionManager, never()).isOnline("LAMP-001");
+        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
+    }
+
+    @Test
+    void roiContract_usesSingleSliderPresetAndOmitsCameraPosePresets() throws Exception {
         DeviceCamRoiItemVO roi = new DeviceCamRoiItemVO();
         roi.setTargetIndex(1);
         roi.setTargetChipId("LAMP-001");
@@ -205,19 +229,23 @@ class DeviceCamServiceImplTest {
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
+        config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setRois(List.of(roi));
-        config.setCapturePresets(Map.of("1", preset));
-        config.setTrackingPresets(Map.of("1", preset));
+        config.setSliderPresets(Map.of("1", 320.0));
 
         ObjectMapper mapper = new ObjectMapper();
         String json = mapper.writeValueAsString(config);
 
-        assertThat(json).contains("\"pan\":10.0", "\"tilt\":-5.0", "\"slider\":320.0");
+        assertThat(json).contains(
+                "\"sliderLampChipId\":\"" + SLIDER_LAMP_CHIP_ID + "\"",
+                "\"sliderPresets\":{\"1\":320.0}"
+        );
         assertThat(json).doesNotContain(
-                "yaw", "pitch", "roll", "centerPreset", "trackingLostTimeoutSeconds",
+                "capturePresets", "trackingPresets", "pan", "tilt", "yaw", "pitch", "roll",
+                "centerPreset", "trackingLostTimeoutSeconds",
                 "dwellSeconds", "leaveDelaySeconds", "confidenceThreshold", "udpIp", "udpPort"
         );
-        assertThat(mapper.readTree(json).path("capturePresets").path("1").size()).isEqualTo(3);
+        assertThat(mapper.readTree(json).path("sliderPresets").path("1").asDouble()).isEqualTo(320.0);
     }
 
     @Test
@@ -244,37 +272,87 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO normalized = service.normalizeConfig("CAM-001", legacy);
         String json = mapper.writeValueAsString(normalized);
 
-        assertThat(normalized.getCapturePresets().get("1").getPan()).isEqualTo(0.0);
-        assertThat(normalized.getCapturePresets().get("1").getTilt()).isEqualTo(-5.0);
-        assertThat(normalized.getCapturePresets().get("1").getSlider()).isEqualTo(0.0);
-        assertThat(normalized.getTrackingPresets().get("1").getPan()).isEqualTo(-45.0);
+        assertThat(normalized.getSliderPresets().get("1")).isEqualTo(0.0);
         assertThat(json).doesNotContain(
-                "yaw", "pitch", "roll", "centerPreset", "trackingLostTimeoutSeconds",
+                "capturePresets", "trackingPresets", "pan", "tilt", "yaw", "pitch", "roll",
+                "centerPreset", "trackingLostTimeoutSeconds",
                 "dwellSeconds", "leaveDelaySeconds", "confidenceThreshold", "udpIp", "udpPort"
         );
     }
 
     @Test
-    void createCaptureTask_sendsNewCapturePreset() throws Exception {
+    void createCaptureTask_sendsSliderToLampAndWaitsBeforeCameraCapture() throws Exception {
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId("CAM-001");
         request.setTargetChipId("LAMP-001");
         request.setTargetIndex(1);
 
-        service.createCaptureTask(request);
+        DeviceCamCaptureTaskRespVO result = service.createCaptureTask(request);
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager).sendToDevice(eq("CAM-001"), payloadCaptor.capture());
+        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode payload = new ObjectMapper().readTree(payloadCaptor.getValue());
-        assertThat(payload.path("capturePreset").path("pan").asDouble()).isEqualTo(0.0);
-        assertThat(payload.path("capturePreset").path("tilt").asDouble()).isEqualTo(0.0);
-        assertThat(payload.path("capturePreset").path("slider").asDouble()).isEqualTo(0.0);
-        assertThat(payload.toString()).doesNotContain("yaw", "pitch", "roll");
+        assertThat(payload.path("type").asText()).isEqualTo("arm_position");
+        assertThat(payload.path("source").asText()).isEqualTo("camera_capture");
+        assertThat(payload.path("taskId").asText()).isEqualTo(result.getTaskId());
+        assertThat(payload.path("slider").asDouble()).isEqualTo(320.0);
+        assertThat(result.getStatus()).isEqualTo("waiting_motion");
+        verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any(String.class));
+    }
+
+    @Test
+    void sliderArrival_sendsBackwardCompatibleCameraCaptureExactlyOnce() throws Exception {
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+
+        DeviceSliderStatusReqVO arrival = sliderArrival(task, SLIDER_LAMP_CHIP_ID, 320.0);
+        service.reportSliderStatus(arrival);
+        service.reportSliderStatus(arrival);
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager, times(1)).sendToDevice(eq("CAM-001"), payloadCaptor.capture());
+        JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
+        assertThat(payload.path("type").asText()).isEqualTo("cameraCapture");
+        assertThat(payload.path("taskId").asText()).isEqualTo(task.getTaskId());
+        assertThat(payload.path("motionReady").asBoolean()).isTrue();
+        assertThat(payload.has("capturePreset")).isFalse();
+        assertThat(task.getStatus()).isEqualTo("capturing");
+    }
+
+    @Test
+    void sliderArrival_withWrongTargetDoesNotTriggerCamera() {
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+
+        service.reportSliderStatus(sliderArrival(task, SLIDER_LAMP_CHIP_ID, 50.0));
+
+        assertThat(task.getStatus()).isEqualTo("waiting_motion");
+        verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any(String.class));
+    }
+
+    @Test
+    void sliderArrival_fromDifferentLampDoesNotTriggerCamera() {
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+
+        service.reportSliderStatus(sliderArrival(task, "LAMP-OTHER", 320.0));
+
+        assertThat(task.getStatus()).isEqualTo("waiting_motion");
+        verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any(String.class));
     }
 
     @Test
     void createCaptureTask_withoutTargetIndex_resolvesCameraPresetFromSelectedLamp() throws Exception {
-        configureManualTrackingDevices(true, false, "192.168.1.88");
+        configureManualTrackingDevices(true, true, "192.168.1.88");
         writeManualCaptureConfig(2);
 
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
@@ -285,42 +363,36 @@ class DeviceCamServiceImplTest {
 
         assertThat(result.getTargetIndex()).isEqualTo(2);
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager).sendToDevice(eq(MANUAL_CAM_CHIP_ID), payloadCaptor.capture());
+        verify(deviceSessionManager).sendToDevice(eq(MANUAL_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
-        assertThat(payload.path("targetChipId").asText()).isEqualTo(MANUAL_LAMP_CHIP_ID);
-        assertThat(payload.path("targetIndex").asInt()).isEqualTo(2);
-        assertThat(payload.path("capturePreset").path("slider").asDouble()).isEqualTo(600.0);
+        assertThat(payload.path("source").asText()).isEqualTo("camera_capture");
+        assertThat(payload.path("taskId").asText()).isEqualTo(result.getTaskId());
+        assertThat(payload.path("slider").asDouble()).isEqualTo(600.0);
+        verify(deviceSessionManager, never()).sendToDevice(eq(MANUAL_CAM_CHIP_ID), any(String.class));
     }
 
     @Test
     void createCaptureTask_withoutTargetIndex_rejectsLampWithoutCameraPreset() {
-        configureManualTrackingDevices(true, false, "192.168.1.88");
+        configureManualTrackingDevices(true, true, "192.168.1.88");
 
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId(MANUAL_CAM_CHIP_ID);
         request.setTargetChipId(MANUAL_LAMP_CHIP_ID);
 
         assertThatThrownBy(() -> service.createCaptureTask(request))
-                .hasMessageContaining("Camera 拍摄预设");
+                .hasMessageContaining("Camera 滑轨预设");
     }
 
     @Test
     void cameraStartTrackingCommand_usesHttpWithoutPortOrLegacyTuningFields() throws Exception {
-        DeviceCamPresetVO preset = new DeviceCamPresetVO();
-        preset.setPan(-20.0);
-        preset.setTilt(15.0);
-        preset.setSlider(600.0);
-
         String json = service.buildCameraStartTrackingCommand(
-                "CAM-001", "LAMP-001", 2, "192.168.1.88", preset
+                "CAM-001", "LAMP-001", 2, "192.168.1.88"
         );
         JsonNode payload = new ObjectMapper().readTree(json);
 
         assertThat(payload.path("transport").asText()).isEqualTo("http");
         assertThat(payload.path("lampIp").asText()).isEqualTo("192.168.1.88");
-        assertThat(payload.path("trackingPreset").path("pan").asDouble()).isEqualTo(-20.0);
-        assertThat(payload.path("trackingPreset").path("tilt").asDouble()).isEqualTo(15.0);
-        assertThat(payload.path("trackingPreset").path("slider").asDouble()).isEqualTo(600.0);
+        assertThat(payload.has("trackingPreset")).isFalse();
         assertThat(json).doesNotContain(
                 "udpIp", "udpPort", "confidenceThreshold", "trackingLostTimeoutSeconds",
                 "yaw", "pitch", "roll"
@@ -329,13 +401,11 @@ class DeviceCamServiceImplTest {
 
     @Test
     void cameraStartTrackingCommand_rejectsBlankOrPortBearingLampIp() {
-        DeviceCamPresetVO preset = new DeviceCamPresetVO();
-
         assertThatThrownBy(() -> service.buildCameraStartTrackingCommand(
-                "CAM-001", "LAMP-001", 1, "", preset
+                "CAM-001", "LAMP-001", 1, ""
         )).hasMessageContaining("灯 IP");
         assertThatThrownBy(() -> service.buildCameraStartTrackingCommand(
-                "CAM-001", "LAMP-001", 1, "192.168.1.88:8080", preset
+                "CAM-001", "LAMP-001", 1, "192.168.1.88:8080"
         )).hasMessageContaining("灯 IP");
     }
 
@@ -393,8 +463,7 @@ class DeviceCamServiceImplTest {
         DeviceDO cam = device(MANUAL_CAM_CHIP_ID, "cam");
         DeviceDO lamp = device(MANUAL_LAMP_CHIP_ID, "lamp");
         lamp.setIp(lampIp);
-        when(deviceMapper.selectOne(any(LambdaQueryWrapper.class)))
-                .thenReturn(cam, lamp, cam, lamp, cam, lamp);
+        stubDevices(cam, lamp);
         when(deviceSessionManager.isOnline(MANUAL_CAM_CHIP_ID)).thenReturn(camOnline);
         when(deviceSessionManager.isOnline(MANUAL_LAMP_CHIP_ID)).thenReturn(lampOnline);
         when(deviceSessionManager.sendToDevice(eq(MANUAL_CAM_CHIP_ID), any(String.class))).thenReturn(true);
@@ -419,16 +488,12 @@ class DeviceCamServiceImplTest {
         roi.setW(0.3);
         roi.setH(0.3);
 
-        DeviceCamPresetVO preset = new DeviceCamPresetVO();
-        preset.setPan(-20.0);
-        preset.setTilt(15.0);
-        preset.setSlider(600.0);
-
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
+        config.setSliderLampChipId(MANUAL_LAMP_CHIP_ID);
         config.setConfigured(true);
         config.setRois(List.of(roi));
-        config.setTrackingPresets(Map.of("1", preset));
+        config.setSliderPresets(Map.of("1", 600.0));
 
         Path path = manualConfigPath();
         Files.createDirectories(path.getParent());
@@ -440,15 +505,11 @@ class DeviceCamServiceImplTest {
         target.setTargetIndex(targetIndex);
         target.setTargetChipId(MANUAL_LAMP_CHIP_ID);
 
-        DeviceCamPresetVO preset = new DeviceCamPresetVO();
-        preset.setPan(0.0);
-        preset.setTilt(0.0);
-        preset.setSlider(600.0);
-
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
+        config.setSliderLampChipId(MANUAL_LAMP_CHIP_ID);
         config.setRois(List.of(target));
-        config.setCapturePresets(Map.of(String.valueOf(targetIndex), preset));
+        config.setSliderPresets(Map.of(String.valueOf(targetIndex), 600.0));
 
         Path path = manualConfigPath();
         Files.createDirectories(path.getParent());
@@ -461,8 +522,45 @@ class DeviceCamServiceImplTest {
         assertThat(objectMapper.readTree(payloadCaptor.getValue()).path("type").asText()).isEqualTo(expectedType);
     }
 
+    private DeviceSliderStatusReqVO sliderArrival(
+            DeviceCamCaptureTaskRespVO task,
+            String sliderLampChipId,
+            double targetMm) {
+        DeviceSliderStatusReqVO status = new DeviceSliderStatusReqVO();
+        status.setChipId(sliderLampChipId);
+        status.setTaskId(task.getTaskId());
+        status.setStatus("arrived");
+        status.setTargetMm(targetMm);
+        status.setPositionSteps(0L);
+        status.setUptimeMs(1000L);
+        return status;
+    }
+
     private Path manualConfigPath() {
         return Path.of("data", "cam-config", MANUAL_CAM_CHIP_ID + ".json").toAbsolutePath().normalize();
+    }
+
+    private void writeDefaultCaptureConfig() {
+        DeviceCamRoiItemVO target = new DeviceCamRoiItemVO();
+        target.setTargetIndex(1);
+        target.setTargetChipId("LAMP-001");
+
+        DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
+        config.setCamChipId("CAM-001");
+        config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
+        config.setRois(List.of(target));
+        config.setSliderPresets(Map.of("1", 320.0));
+
+        try {
+            Files.createDirectories(defaultConfigPath().getParent());
+            objectMapper.writeValue(defaultConfigPath().toFile(), config);
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to create default camera config", e);
+        }
+    }
+
+    private Path defaultConfigPath() {
+        return Path.of("data", "cam-config", "CAM-001.json").toAbsolutePath().normalize();
     }
 
     private DeviceDO device(String chipId, String deviceType) {
@@ -471,5 +569,22 @@ class DeviceCamServiceImplTest {
         device.setDeviceType(deviceType);
         device.setStoreId(1L);
         return device;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void stubDevices(DeviceDO... devices) {
+        Map<String, DeviceDO> byChipId = new LinkedHashMap<>();
+        for (DeviceDO device : devices) {
+            byChipId.put(device.getChipId(), device);
+        }
+        when(deviceMapper.selectOne(any(LambdaQueryWrapper.class))).thenAnswer(invocation -> {
+            LambdaQueryWrapper<DeviceDO> wrapper = invocation.getArgument(0);
+            return wrapper.getParamNameValuePairs().values().stream()
+                    .map(String::valueOf)
+                    .map(byChipId::get)
+                    .filter(java.util.Objects::nonNull)
+                    .findFirst()
+                    .orElse(null);
+        });
     }
 }

@@ -34,6 +34,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 @RequiredArgsConstructor
 public class DeviceServiceImpl implements DeviceService {
 
+    private static final double DEFAULT_GARMENT_PAN = 0D;
+    private static final double DEFAULT_GARMENT_TILT = 20D;
+    private static final double DEFAULT_PERSON_PAN = 0D;
+    private static final double DEFAULT_PERSON_TILT = -30D;
+
     private final WebSocketPushService webSocketPushService;
     private final DeviceSessionManager deviceSessionManager;
     private final DeviceMapper deviceMapper;
@@ -122,6 +127,18 @@ public class DeviceServiceImpl implements DeviceService {
             if (reqVO.getGarmentAimEnabled() != null) {
                 exist.setGarmentAimEnabled(reqVO.getGarmentAimEnabled());
             }
+            if (reqVO.getGarmentDefaultPan() != null) {
+                exist.setGarmentDefaultPan(reqVO.getGarmentDefaultPan());
+            }
+            if (reqVO.getGarmentDefaultTilt() != null) {
+                exist.setGarmentDefaultTilt(reqVO.getGarmentDefaultTilt());
+            }
+            if (reqVO.getPersonDefaultPan() != null) {
+                exist.setPersonDefaultPan(reqVO.getPersonDefaultPan());
+            }
+            if (reqVO.getPersonDefaultTilt() != null) {
+                exist.setPersonDefaultTilt(reqVO.getPersonDefaultTilt());
+            }
             exist.setRecommendedBrightness(reqVO.getRecommendedBrightness());
             exist.setRecommendedTemp(reqVO.getRecommendedTemp());
             exist.setFabric(reqVO.getFabric());
@@ -174,6 +191,18 @@ public class DeviceServiceImpl implements DeviceService {
         DeviceDO updateObj = DeviceConvert.convert(reqVO);
         if (reqVO.getGarmentAimEnabled() == null) {
             updateObj.setGarmentAimEnabled(device.getGarmentAimEnabled());
+        }
+        if (reqVO.getGarmentDefaultPan() == null) {
+            updateObj.setGarmentDefaultPan(device.getGarmentDefaultPan());
+        }
+        if (reqVO.getGarmentDefaultTilt() == null) {
+            updateObj.setGarmentDefaultTilt(device.getGarmentDefaultTilt());
+        }
+        if (reqVO.getPersonDefaultPan() == null) {
+            updateObj.setPersonDefaultPan(device.getPersonDefaultPan());
+        }
+        if (reqVO.getPersonDefaultTilt() == null) {
+            updateObj.setPersonDefaultTilt(device.getPersonDefaultTilt());
         }
         updateObj.setId(id);
         updateObj.setCreateTime(device.getCreateTime());
@@ -403,6 +432,18 @@ public class DeviceServiceImpl implements DeviceService {
             if (device.getGarmentAimEnabled() == null) {
                 device.setGarmentAimEnabled(false);
             }
+            if (device.getGarmentDefaultPan() == null) {
+                device.setGarmentDefaultPan(DEFAULT_GARMENT_PAN);
+            }
+            if (device.getGarmentDefaultTilt() == null) {
+                device.setGarmentDefaultTilt(DEFAULT_GARMENT_TILT);
+            }
+            if (device.getPersonDefaultPan() == null) {
+                device.setPersonDefaultPan(DEFAULT_PERSON_PAN);
+            }
+            if (device.getPersonDefaultTilt() == null) {
+                device.setPersonDefaultTilt(DEFAULT_PERSON_TILT);
+            }
             return;
         }
 
@@ -410,6 +451,10 @@ public class DeviceServiceImpl implements DeviceService {
         device.setTemp(null);
         device.setAutoMode(null);
         device.setGarmentAimEnabled(null);
+        device.setGarmentDefaultPan(null);
+        device.setGarmentDefaultTilt(null);
+        device.setPersonDefaultPan(null);
+        device.setPersonDefaultTilt(null);
         device.setRecommendedBrightness(null);
         device.setRecommendedTemp(null);
         device.setFabric(null);

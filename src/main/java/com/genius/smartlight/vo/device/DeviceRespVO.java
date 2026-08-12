@@ -46,6 +46,11 @@ public class DeviceRespVO {
     @Schema(description = "是否根据最新服装坐标调整照射位置；false 使用默认服装预设", example = "false")
     private Boolean garmentAimEnabled;
 
+    private Double garmentDefaultPan;
+    private Double garmentDefaultTilt;
+    private Double personDefaultPan;
+    private Double personDefaultTilt;
+
     @Schema(description = "AI 推荐亮度，范围通常为 0-100", example = "75")
     private Integer recommendedBrightness;
 

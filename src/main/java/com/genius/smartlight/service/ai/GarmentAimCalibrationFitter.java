@@ -4,15 +4,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Fits an affine image-coordinate to lamp-position model:
- * output = intercept + xCoefficient * centerX + yCoefficient * centerY.
+ * Fits affine garment Pan/Tilt offsets from the configured default pose:
+ * offset = intercept + xCoefficient * centerX + yCoefficient * centerY.
  */
 public final class GarmentAimCalibrationFitter {
 
     public static final int MIN_SAMPLE_COUNT = 4;
     public static final int RECOMMENDED_SAMPLE_COUNT = 6;
     public static final double MIN_AXIS_COVERAGE = 0.12D;
-
     private static final double PIVOT_EPSILON = 1.0E-9D;
 
     private GarmentAimCalibrationFitter() {
@@ -33,24 +32,17 @@ public final class GarmentAimCalibrationFitter {
 
         AxisModel pan = fitAxis(samples, Axis.PAN);
         AxisModel tilt = fitAxis(samples, Axis.TILT);
-        AxisModel slider = fitAxis(samples, Axis.SLIDER);
-        if (pan == null || tilt == null || slider == null) {
+        if (pan == null || tilt == null) {
             return new FitResult(false, "degenerate_samples", xCoverage, yCoverage, null);
         }
-        return new FitResult(
-                true,
-                "ready",
-                xCoverage,
-                yCoverage,
-                new Model(pan, tilt, slider)
-        );
+        return new FitResult(true, "ready", xCoverage, yCoverage, new Model(pan, tilt));
     }
 
     private static boolean valid(Sample sample) {
         return sample != null
                 && finite(sample.centerX()) && sample.centerX() >= 0D && sample.centerX() <= 1D
                 && finite(sample.centerY()) && sample.centerY() >= 0D && sample.centerY() <= 1D
-                && finite(sample.pan()) && finite(sample.tilt()) && finite(sample.slider());
+                && finite(sample.pan()) && finite(sample.tilt());
     }
 
     private static double coverage(List<Sample> samples, boolean horizontal) {
@@ -144,12 +136,7 @@ public final class GarmentAimCalibrationFitter {
         return Double.isFinite(value);
     }
 
-    public record Sample(
-            double centerX,
-            double centerY,
-            double pan,
-            double tilt,
-            double slider) {
+    public record Sample(double centerX, double centerY, double pan, double tilt) {
     }
 
     public record AxisModel(
@@ -157,24 +144,18 @@ public final class GarmentAimCalibrationFitter {
             double xCoefficient,
             double yCoefficient,
             double rmse) {
-
         public double predict(double centerX, double centerY) {
             return intercept + xCoefficient * centerX + yCoefficient * centerY;
         }
     }
 
-    public record Model(AxisModel pan, AxisModel tilt, AxisModel slider) {
-
+    public record Model(AxisModel pan, AxisModel tilt) {
         public Pose predict(double centerX, double centerY) {
-            return new Pose(
-                    pan.predict(centerX, centerY),
-                    tilt.predict(centerX, centerY),
-                    slider.predict(centerX, centerY)
-            );
+            return new Pose(pan.predict(centerX, centerY), tilt.predict(centerX, centerY));
         }
     }
 
-    public record Pose(double pan, double tilt, double slider) {
+    public record Pose(double pan, double tilt) {
     }
 
     public record FitResult(
@@ -197,15 +178,8 @@ public final class GarmentAimCalibrationFitter {
             double value(Sample sample) {
                 return sample.tilt();
             }
-        },
-        SLIDER {
-            @Override
-            double value(Sample sample) {
-                return sample.slider();
-            }
         };
 
         abstract double value(Sample sample);
     }
-
 }

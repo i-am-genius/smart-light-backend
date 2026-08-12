@@ -1,6 +1,7 @@
 package com.genius.smartlight.service.device.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
@@ -35,12 +36,11 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationService {
 
-    private static final int DOCUMENT_VERSION = 1;
+    private static final int DOCUMENT_VERSION = 2;
     private static final int MAX_SAMPLE_COUNT = 60;
 
-    private static final double DEFAULT_PAN = 0D;
-    private static final double DEFAULT_TILT = 20D;
-    private static final double DEFAULT_SLIDER = 0D;
+    private static final double LEGACY_DEFAULT_PAN = 0D;
+    private static final double LEGACY_DEFAULT_TILT = 20D;
     private static final double DEFAULT_HORIZONTAL_FOV = 60D;
     private static final double DEFAULT_VERTICAL_FOV = 45D;
 
@@ -83,9 +83,8 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
         sample.setId(UUID.randomUUID().toString());
         sample.setCenterX(target.centerX());
         sample.setCenterY(target.centerY());
-        sample.setPan(reqVO.getPan());
-        sample.setTilt(reqVO.getTilt());
-        sample.setSlider(reqVO.getSlider());
+        sample.setPanOffset(reqVO.getPan() - defaultGarmentPan(lamp));
+        sample.setTiltOffset(reqVO.getTilt() - defaultGarmentTilt(lamp));
         sample.setRecognizedAt(snapshot.getRecognizedAt());
         sample.setCreatedAt(LocalDateTime.now());
         document.getSamples().add(sample);
@@ -93,6 +92,7 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
         while (document.getSamples().size() > MAX_SAMPLE_COUNT) {
             document.getSamples().remove(0);
         }
+        document.setVersion(DOCUMENT_VERSION);
         document.setUpdatedAt(LocalDateTime.now());
         persist(lamp, document);
         return buildResponse(lamp, document);
@@ -126,7 +126,7 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
         if (!fit.ready() || fit.model() == null) {
             return Optional.empty();
         }
-        return Optional.of(clamp(fit.model().predict(target.centerX(), target.centerY())));
+        return Optional.of(applyDefault(lamp, fit.model().predict(target.centerX(), target.centerY())));
     }
 
     private DeviceDO requireOwnedLamp(String lampChipId) {
@@ -198,9 +198,8 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
                 .map(sample -> new GarmentAimCalibrationFitter.Sample(
                         sample.getCenterX(),
                         sample.getCenterY(),
-                        sample.getPan(),
-                        sample.getTilt(),
-                        sample.getSlider()
+                        panOffset(sample),
+                        tiltOffset(sample)
                 ))
                 .toList();
         return GarmentAimCalibrationFitter.fit(samples);
@@ -224,11 +223,10 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
         if (fit.model() != null) {
             response.setRmsePan(fit.model().pan().rmse());
             response.setRmseTilt(fit.model().tilt().rmse());
-            response.setRmseSlider(fit.model().slider().rmse());
         }
         response.setSamples(document.getSamples().stream()
                 .sorted(Comparator.comparing(StoredSample::getCreatedAt).reversed())
-                .map(this::toResponseSample)
+                .map(sample -> toResponseSample(lamp, sample))
                 .toList());
 
         Optional<GarmentResultSnapshot> snapshot = GarmentResultCodec.decode(lamp.getGarmentResultJson());
@@ -245,30 +243,30 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
 
             GarmentAimCalibrationFitter.Pose suggestion;
             if (fit.ready() && fit.model() != null) {
-                suggestion = clamp(fit.model().predict(value.centerX(), value.centerY()));
+                suggestion = applyDefault(lamp, fit.model().predict(value.centerX(), value.centerY()));
                 response.setSuggestionSource("calibrated");
             } else {
-                suggestion = fallback(value);
+                suggestion = fallback(lamp, value);
                 response.setSuggestionSource("default");
             }
             response.setSuggestedPan(suggestion.pan());
             response.setSuggestedTilt(suggestion.tilt());
-            response.setSuggestedSlider(suggestion.slider());
         } else {
             response.setCurrentTargetSampled(false);
         }
         return response;
     }
 
-    private DeviceGarmentAimCalibrationRespVO.Sample toResponseSample(StoredSample stored) {
+    private DeviceGarmentAimCalibrationRespVO.Sample toResponseSample(
+            DeviceDO lamp,
+            StoredSample stored) {
         DeviceGarmentAimCalibrationRespVO.Sample sample =
                 new DeviceGarmentAimCalibrationRespVO.Sample();
         sample.setId(stored.getId());
         sample.setCenterX(stored.getCenterX());
         sample.setCenterY(stored.getCenterY());
-        sample.setPan(stored.getPan());
-        sample.setTilt(stored.getTilt());
-        sample.setSlider(stored.getSlider());
+        sample.setPan(defaultGarmentPan(lamp) + panOffset(stored));
+        sample.setTilt(defaultGarmentTilt(lamp) + tiltOffset(stored));
         sample.setRecognizedAt(stored.getRecognizedAt());
         sample.setCreatedAt(stored.getCreatedAt());
         return sample;
@@ -286,19 +284,54 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
         };
     }
 
-    private GarmentAimCalibrationFitter.Pose fallback(GarmentAimTarget target) {
+    private GarmentAimCalibrationFitter.Pose fallback(
+            DeviceDO lamp,
+            GarmentAimTarget target) {
         return clamp(new GarmentAimCalibrationFitter.Pose(
-                DEFAULT_PAN + (target.centerX() - 0.5D) * DEFAULT_HORIZONTAL_FOV,
-                DEFAULT_TILT - (target.centerY() - 0.5D) * DEFAULT_VERTICAL_FOV,
-                DEFAULT_SLIDER
+                defaultGarmentPan(lamp) + (target.centerX() - 0.5D) * DEFAULT_HORIZONTAL_FOV,
+                defaultGarmentTilt(lamp) - (target.centerY() - 0.5D) * DEFAULT_VERTICAL_FOV
         ));
+    }
+
+    private GarmentAimCalibrationFitter.Pose applyDefault(
+            DeviceDO lamp,
+            GarmentAimCalibrationFitter.Pose offset) {
+        return clamp(new GarmentAimCalibrationFitter.Pose(
+                defaultGarmentPan(lamp) + offset.pan(),
+                defaultGarmentTilt(lamp) + offset.tilt()
+        ));
+    }
+
+    private double defaultGarmentPan(DeviceDO lamp) {
+        return lamp.getGarmentDefaultPan() != null
+                ? lamp.getGarmentDefaultPan()
+                : LEGACY_DEFAULT_PAN;
+    }
+
+    private double defaultGarmentTilt(DeviceDO lamp) {
+        return lamp.getGarmentDefaultTilt() != null
+                ? lamp.getGarmentDefaultTilt()
+                : LEGACY_DEFAULT_TILT;
+    }
+
+    private double panOffset(StoredSample sample) {
+        if (sample.getPanOffset() != null) {
+            return sample.getPanOffset();
+        }
+        return sample.getPan() != null ? sample.getPan() - LEGACY_DEFAULT_PAN : Double.NaN;
+    }
+
+    private double tiltOffset(StoredSample sample) {
+        if (sample.getTiltOffset() != null) {
+            return sample.getTiltOffset();
+        }
+        return sample.getTilt() != null ? sample.getTilt() - LEGACY_DEFAULT_TILT : Double.NaN;
     }
 
     private GarmentAimCalibrationFitter.Pose clamp(GarmentAimCalibrationFitter.Pose pose) {
         return new GarmentAimCalibrationFitter.Pose(
                 clamp(pose.pan(), -90D, 90D),
-                clamp(pose.tilt(), -90D, 90D),
-                clamp(pose.slider(), 0D, 1200D)
+                clamp(pose.tilt(), -90D, 90D)
         );
     }
 
@@ -318,8 +351,16 @@ public class GarmentAimCalibrationServiceImpl implements GarmentAimCalibrationSe
         private String id;
         private Double centerX;
         private Double centerY;
+        private Double panOffset;
+        private Double tiltOffset;
+
+        @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
         private Double pan;
+
+        @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
         private Double tilt;
+
+        @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
         private Double slider;
         private LocalDateTime recognizedAt;
         private LocalDateTime createdAt;

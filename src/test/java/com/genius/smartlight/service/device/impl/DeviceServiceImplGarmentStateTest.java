@@ -172,6 +172,10 @@ class DeviceServiceImplGarmentStateTest {
         verify(webSocketPushService).pushState(browserState.capture());
         DeviceRespVO state = browserState.getValue();
         assertThat(state.getBrightness()).isEqualTo(75);
+        assertThat(state.getGarmentDefaultPan()).isEqualTo(4D);
+        assertThat(state.getGarmentDefaultTilt()).isEqualTo(22D);
+        assertThat(state.getPersonDefaultPan()).isEqualTo(-3D);
+        assertThat(state.getPersonDefaultTilt()).isEqualTo(-26D);
         assertThat(state.getDisplayName()).isEqualTo("Updated lamp");
         assertThat(state.getOutfitType()).isEqualTo("dress");
         assertThat(state.getGarments())
@@ -195,6 +199,10 @@ class DeviceServiceImplGarmentStateTest {
         request.setBrightness(75);
         request.setTemp(4800);
         request.setAutoMode(false);
+        request.setGarmentDefaultPan(4D);
+        request.setGarmentDefaultTilt(22D);
+        request.setPersonDefaultPan(-3D);
+        request.setPersonDefaultTilt(-26D);
         request.setRecommendedBrightness(80);
         request.setRecommendedTemp(5000);
         request.setFabric("updated-legacy-fabric");
@@ -244,6 +252,10 @@ class DeviceServiceImplGarmentStateTest {
         device.setBrightness(75);
         device.setTemp(4800);
         device.setAutoMode(false);
+        device.setGarmentDefaultPan(4D);
+        device.setGarmentDefaultTilt(22D);
+        device.setPersonDefaultPan(-3D);
+        device.setPersonDefaultTilt(-26D);
         device.setRecommendedBrightness(80);
         device.setRecommendedTemp(5000);
         device.setFabric("updated-legacy-fabric");

@@ -1,6 +1,8 @@
 package com.genius.smartlight.vo.device;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -42,6 +44,26 @@ public class DeviceSaveReqVO {
 
     @Schema(description = "是否根据最新服装识别坐标调整照射位置；false 使用默认服装预设", example = "false")
     private Boolean garmentAimEnabled;
+
+    @DecimalMin(value = "-90")
+    @DecimalMax(value = "90")
+    @Schema(description = "默认服装照射 Pan 角度", example = "0")
+    private Double garmentDefaultPan;
+
+    @DecimalMin(value = "-90")
+    @DecimalMax(value = "90")
+    @Schema(description = "默认服装照射 Tilt 角度", example = "20")
+    private Double garmentDefaultTilt;
+
+    @DecimalMin(value = "-90")
+    @DecimalMax(value = "90")
+    @Schema(description = "默认照人 Pan 角度", example = "0")
+    private Double personDefaultPan;
+
+    @DecimalMin(value = "-90")
+    @DecimalMax(value = "90")
+    @Schema(description = "默认照人 Tilt 角度", example = "-30")
+    private Double personDefaultTilt;
 
     @Schema(description = "AI 推荐亮度，范围通常为 0-100", example = "75")
     private Integer recommendedBrightness;

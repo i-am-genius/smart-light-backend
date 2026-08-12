@@ -2,7 +2,6 @@ package com.genius.smartlight.vo.device;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.DecimalMax;
-import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 
@@ -20,8 +19,4 @@ public class DeviceGarmentAimCalibrationSampleReqVO {
     @DecimalMax("90")
     private Double tilt;
 
-    @NotNull
-    @DecimalMin("0")
-    @DecimalMax("1200")
-    private Double slider;
 }

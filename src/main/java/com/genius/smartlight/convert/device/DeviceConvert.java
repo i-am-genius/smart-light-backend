@@ -18,6 +18,10 @@ public class DeviceConvert {
         device.setTemp(reqVO.getTemp());
         device.setAutoMode(reqVO.getAutoMode());
         device.setGarmentAimEnabled(reqVO.getGarmentAimEnabled());
+        device.setGarmentDefaultPan(reqVO.getGarmentDefaultPan());
+        device.setGarmentDefaultTilt(reqVO.getGarmentDefaultTilt());
+        device.setPersonDefaultPan(reqVO.getPersonDefaultPan());
+        device.setPersonDefaultTilt(reqVO.getPersonDefaultTilt());
         device.setRecommendedBrightness(reqVO.getRecommendedBrightness());
         device.setRecommendedTemp(reqVO.getRecommendedTemp());
         device.setFabric(reqVO.getFabric());
@@ -38,6 +42,10 @@ public class DeviceConvert {
         respVO.setTemp(device.getTemp());
         respVO.setAutoMode(device.getAutoMode());
         respVO.setGarmentAimEnabled(device.getGarmentAimEnabled());
+        respVO.setGarmentDefaultPan(device.getGarmentDefaultPan());
+        respVO.setGarmentDefaultTilt(device.getGarmentDefaultTilt());
+        respVO.setPersonDefaultPan(device.getPersonDefaultPan());
+        respVO.setPersonDefaultTilt(device.getPersonDefaultTilt());
         respVO.setRecommendedBrightness(device.getRecommendedBrightness());
         respVO.setRecommendedTemp(device.getRecommendedTemp());
         respVO.setFabric(device.getFabric());

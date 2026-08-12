@@ -61,6 +61,10 @@ public class WebSocketPushService {
             payload.put("temp", data.getTemp());
             payload.put("autoMode", data.getAutoMode());
             payload.put("garmentAimEnabled", Boolean.TRUE.equals(data.getGarmentAimEnabled()));
+            payload.put("garmentDefaultPan", defaultAngle(data.getGarmentDefaultPan(), 0D));
+            payload.put("garmentDefaultTilt", defaultAngle(data.getGarmentDefaultTilt(), 20D));
+            payload.put("personDefaultPan", defaultAngle(data.getPersonDefaultPan(), 0D));
+            payload.put("personDefaultTilt", defaultAngle(data.getPersonDefaultTilt(), -30D));
             payload.put("recommendedBrightness", data.getRecommendedBrightness());
             payload.put("recommendedTemp", data.getRecommendedTemp());
             payload.put("fabric", data.getFabric());
@@ -88,7 +92,6 @@ public class WebSocketPushService {
                     payload.put("garmentCalibrationValid", true);
                     payload.put("garmentAimPan", pose.pan());
                     payload.put("garmentAimTilt", pose.tilt());
-                    payload.put("garmentAimSlider", pose.slider());
                 }
             }
 
@@ -108,6 +111,10 @@ public class WebSocketPushService {
         } catch (Exception e) {
             log.error("Device state push error, chipId={}", chipId, e);
         }
+    }
+
+    private double defaultAngle(Double value, double fallback) {
+        return value != null && Double.isFinite(value) ? value : fallback;
     }
 
     public void pushOnlineStatus(DeviceOnlineStatusRespVO data, Long storeId) {

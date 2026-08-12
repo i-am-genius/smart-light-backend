@@ -45,6 +45,18 @@ public class DeviceDO {
     @TableField("garment_aim_enabled")
     private Boolean garmentAimEnabled;
 
+    @TableField("garment_default_pan")
+    private Double garmentDefaultPan;
+
+    @TableField("garment_default_tilt")
+    private Double garmentDefaultTilt;
+
+    @TableField("person_default_pan")
+    private Double personDefaultPan;
+
+    @TableField("person_default_tilt")
+    private Double personDefaultTilt;
+
     @TableField("recommended_brightness")
     private Integer recommendedBrightness;
 

@@ -17,6 +17,7 @@ import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
+import com.genius.smartlight.vo.device.DeviceSliderStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -193,6 +194,26 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 }
                 deviceSessionManager.touch(chipId);
                 saveDeviceSelfTest(chipId, selfTestNode);
+                return;
+            }
+
+            if ("sliderStatus".equals(type)) {
+                chipId = requireChipId(chipId, session, "sliderStatus");
+                if (chipId == null) return;
+                DeviceSliderStatusReqVO reqVO = new DeviceSliderStatusReqVO();
+                reqVO.setChipId(chipId);
+                reqVO.setTaskId(node.path("taskId").asText(null));
+                reqVO.setStatus(node.path("status").asText("unknown"));
+                if (node.hasNonNull("targetMm")) {
+                    reqVO.setTargetMm(node.path("targetMm").asDouble());
+                }
+                if (node.hasNonNull("positionSteps")) {
+                    reqVO.setPositionSteps(node.path("positionSteps").asLong());
+                }
+                if (node.hasNonNull("uptimeMs")) {
+                    reqVO.setUptimeMs(node.path("uptimeMs").asLong());
+                }
+                deviceCamService.reportSliderStatus(reqVO);
                 return;
             }
 

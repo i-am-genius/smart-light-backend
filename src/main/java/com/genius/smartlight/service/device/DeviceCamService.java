@@ -12,11 +12,15 @@ import com.genius.smartlight.vo.device.DeviceCamStatusRespVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
 import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
 import com.genius.smartlight.vo.device.DeviceLampClothStateRespVO;
+import com.genius.smartlight.vo.device.DeviceLampProximityStateReqVO;
+import com.genius.smartlight.vo.device.DeviceLampProximityStateRespVO;
 import com.genius.smartlight.vo.device.DeviceSliderStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
 import org.springframework.core.io.Resource;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.time.LocalDateTime;
 
 public interface DeviceCamService {
     DeviceCamRoiConfigVO getRoiConfig(String camChipId);
@@ -55,5 +59,21 @@ public interface DeviceCamService {
 
     DeviceLampClothStateRespVO reportLampClothState(DeviceLampClothStateReqVO reqVO);
 
+    DeviceLampProximityStateRespVO reportLampProximityState(DeviceLampProximityStateReqVO reqVO);
+
     DeviceTrackingStatusRespVO reportTrackingStatus(DeviceTrackingStatusReqVO reqVO);
+
+    void resetAutomaticGarmentDetection(Long storeId);
+
+    void startAutomaticGarmentDetection(Long storeId);
+
+    void handleDeviceOnlineStatusChanged(String chipId, boolean online);
+
+    String getGarmentDetectionStatus(Long storeId);
+
+    Boolean getLampNearby(String chipId);
+
+    LocalDateTime getLastTakenAt(String chipId);
+
+    String getTrackingStatus(String chipId);
 }

@@ -23,6 +23,8 @@ public class DeviceOnlinePushService {
     private final DeviceSessionManager deviceSessionManager;
     private final WebSocketPushService webSocketPushService;
     private final DeviceLastSeenService deviceLastSeenService;
+    private final DeviceFleetLifecycleService deviceFleetLifecycleService;
+    private final DeviceCamService deviceCamService;
 
     /**
      * 记录上一次已推送的在线状态，避免重复推送
@@ -55,6 +57,8 @@ public class DeviceOnlinePushService {
             DeviceOnlineStatusRespVO respVO = buildOnlineStatus(chipId, device);
             webSocketPushService.pushOnlineStatus(respVO, storeId);
             lastPushedStatusMap.put(chipId, currentOnline);
+            deviceCamService.handleDeviceOnlineStatusChanged(chipId, currentOnline);
+            deviceFleetLifecycleService.onOnlineStatusChanged(storeId);
         }
     }
 
@@ -115,6 +119,12 @@ public class DeviceOnlinePushService {
         respVO.setOnline(deviceSessionManager.isOnline(chipId));
         respVO.setLastSeen(deviceSessionManager.getLastSeen(chipId));
         respVO.setLastSeenAt(device != null ? device.getLastSeenAt() : null);
+        if (device != null) {
+            respVO.setGarmentDetectionStatus(deviceCamService.getGarmentDetectionStatus(device.getStoreId()));
+            respVO.setNearby(deviceCamService.getLampNearby(chipId));
+            respVO.setLastTakenAt(deviceCamService.getLastTakenAt(chipId));
+            respVO.setTrackingStatus(deviceCamService.getTrackingStatus(chipId));
+        }
         return respVO;
     }
 }

@@ -5,6 +5,7 @@ import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.service.device.DeviceOnlineService;
+import com.genius.smartlight.service.device.DeviceCamService;
 import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.device.DeviceOnlineStatusRespVO;
 import com.genius.smartlight.websocket.DeviceSessionManager;
@@ -20,6 +21,7 @@ public class DeviceOnlineServiceImpl implements DeviceOnlineService {
     private final DeviceMapper deviceMapper;
     private final CurrentStoreService currentStoreService;
     private final DeviceSessionManager deviceSessionManager;
+    private final DeviceCamService deviceCamService;
 
     @Override
     public DeviceOnlineStatusRespVO getOnlineStatus(String chipId) {
@@ -55,6 +57,10 @@ public class DeviceOnlineServiceImpl implements DeviceOnlineService {
         respVO.setOnline(deviceSessionManager.isOnline(device.getChipId()));
         respVO.setLastSeen(deviceSessionManager.getLastSeen(device.getChipId()));
         respVO.setLastSeenAt(device.getLastSeenAt());
+        respVO.setGarmentDetectionStatus(deviceCamService.getGarmentDetectionStatus(device.getStoreId()));
+        respVO.setNearby(deviceCamService.getLampNearby(device.getChipId()));
+        respVO.setLastTakenAt(deviceCamService.getLastTakenAt(device.getChipId()));
+        respVO.setTrackingStatus(deviceCamService.getTrackingStatus(device.getChipId()));
         return respVO;
     }
 }

@@ -11,6 +11,7 @@ import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.DurationRecordMapper;
 import com.genius.smartlight.service.ai.AiService;
 import com.genius.smartlight.service.device.DeviceCamService;
+import com.genius.smartlight.service.device.SliderMotionStateService;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.device.DeviceCamCaptureBatchReqVO;
@@ -21,6 +22,7 @@ import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceRespVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiItemVO;
+import com.genius.smartlight.vo.device.DeviceCamSliderMoveTimeVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusRespVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
@@ -78,10 +80,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private static final Path CAM_CONFIG_DIR = Path.of("data", "cam-config").toAbsolutePath().normalize();
     private static final Path CAM_UPLOAD_DIR = Path.of("data", "cam-upload").toAbsolutePath().normalize();
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
-    private static final int MOTION_TIMEOUT_SECONDS = 45;
     private static final int CAPTURE_TIMEOUT_SECONDS = 45;
     private static final int BATCH_TARGET_COUNT = 3;
-    private static final double SLIDER_ARRIVAL_TOLERANCE_MM = 0.05D;
+    private static final double SLIDER_STATE_RECONCILIATION_TOLERANCE_MM = 0.05D;
 
     private final DeviceMapper deviceMapper;
     private final CurrentStoreService currentStoreService;
@@ -90,6 +91,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private final PersonFlowRecordService personFlowRecordService;
     private final DurationRecordMapper durationRecordMapper;
     private final AiService aiService;
+    private final SliderMotionStateService sliderMotionStateService;
     private final ObjectMapper objectMapper;
     @Autowired
     @Qualifier("deviceRestTemplate")
@@ -373,6 +375,12 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             throw new ServiceException("滑轨控制灯离线，无法执行滑轨对位");
         }
         double sliderTargetMm = resolveSliderPreset(config, targetIndex);
+        TimedSliderMotion motionPlan = planSliderMotion(
+                config,
+                targetIndex,
+                sliderLamp,
+                sliderTargetMm
+        );
 
         DeviceCamCaptureTaskRespVO task = new DeviceCamCaptureTaskRespVO();
         task.setTaskId(UUID.randomUUID().toString());
@@ -380,7 +388,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         task.setTargetChipId(target.getChipId());
         task.setTargetIndex(targetIndex);
         task.setStatus("waiting_motion");
-        task.setMessage("waiting for slider arrival");
+        task.setMessage("waiting for estimated slider motion time");
         task.setCreateTime(LocalDateTime.now());
         claimCaptureSlot(
                 activeCaptureTaskBySliderLamp,
@@ -427,8 +435,15 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             throw new ServiceException("滑轨对位指令发送失败");
         }
 
+        try {
+            beginSliderMotion(sliderLamp, motionPlan);
+        } catch (RuntimeException e) {
+            discardCaptureTask(task);
+            log.warn("slider state save failed, taskId={}", task.getTaskId(), e);
+            throw new ServiceException("滑轨位置状态保存失败，请检查数据库迁移");
+        }
         webSocketPushService.pushCamCaptureTask(task, cam.getStoreId());
-        scheduleMotionTimeout(task.getTaskId());
+        scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
         return task;
     }
 
@@ -445,6 +460,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
 
         List<BatchCaptureTarget> targets = buildBatchCaptureTargets(config);
+        validateBatchMotionCalibration(config, sliderLamp, targets);
         String batchId = UUID.randomUUID().toString();
         DeviceCamCaptureBatchRespVO batch = new DeviceCamCaptureBatchRespVO();
         batch.setBatchId(batchId);
@@ -487,9 +503,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 captureUploadTokens.put(task.getTaskId(), UUID.randomUUID().toString().replace("-", ""));
             }
 
-            double targetTwoMm = targets.stream()
+            BatchCaptureTarget targetTwo = targets.stream()
                     .filter(target -> target.targetIndex() == 2)
-                    .mapToDouble(BatchCaptureTarget::sliderTargetMm)
                     .findFirst()
                     .orElseThrow(() -> new ServiceException("区域 2 滑轨预设缺失"));
             CaptureBatchContext context = new CaptureBatchContext(
@@ -497,7 +512,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                     targets,
                     sliderLamp.getChipId(),
                     cam.getStoreId(),
-                    targetTwoMm
+                    config,
+                    targetTwo
             );
             batchContexts.put(batchId, context);
             for (DeviceCamCaptureTaskRespVO queuedTask : batch.getTasks()) {
@@ -516,67 +532,93 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (reqVO == null || !"arrived".equalsIgnoreCase(defaultStatus(reqVO.getStatus(), ""))) {
             return;
         }
-        String taskId = notBlank(reqVO.getTaskId()) ? reqVO.getTaskId().trim() : null;
-        if (taskId == null || !notBlank(reqVO.getChipId()) || reqVO.getTargetMm() == null) {
+        if (!notBlank(reqVO.getChipId()) || reqVO.getTargetMm() == null) {
             return;
         }
-
-        PendingBatchReturn pendingReturn = pendingBatchReturns.get(taskId);
-        if (pendingReturn != null) {
-            handleBatchReturnArrival(reqVO, taskId, pendingReturn);
-            return;
-        }
-
-        PendingCaptureMotion pending = pendingCaptureMotions.get(taskId);
-        DeviceCamCaptureTaskRespVO task = taskCache.get(taskId);
-        if (pending == null || task == null || !"waiting_motion".equals(task.getStatus())) {
-            return;
-        }
-        if (!sameChipId(reqVO.getChipId(), pending.sliderLampChipId())) {
-            log.warn("slider arrival ignored: lamp mismatch, taskId={}, expected={}, actual={}",
-                    taskId, pending.sliderLampChipId(), reqVO.getChipId());
-            return;
-        }
-        if (Math.abs(reqVO.getTargetMm() - pending.sliderTargetMm()) > SLIDER_ARRIVAL_TOLERANCE_MM) {
-            log.warn("slider arrival ignored: target mismatch, taskId={}, expected={}, actual={}",
-                    taskId, pending.sliderTargetMm(), reqVO.getTargetMm());
-            return;
-        }
-        if (!pendingCaptureMotions.remove(taskId, pending)) {
-            return;
-        }
-
-        if (!deviceSessionManager.isOnline(pending.camChipId())) {
-            failCaptureTask(task, "camera_offline", "slider arrived but camera is offline", pending.storeId());
-            return;
-        }
-
-        ObjectNode capture = objectMapper.createObjectNode();
-        capture.put("type", "cameraCapture");
-        capture.put("taskId", taskId);
-        capture.put("camChipId", pending.camChipId());
-        capture.put("targetChipId", pending.targetChipId());
-        capture.put("targetIndex", pending.targetIndex());
-        capture.put("motionReady", true);
-        capture.put("uploadUrl", "/device/cam/capture-task/" + taskId + "/photo");
-        capture.put("uploadToken", pending.uploadToken());
-        boolean captureSent;
         try {
-            captureSent = deviceSessionManager.sendToDevice(pending.camChipId(), capture.toString());
+            DeviceDO sliderLamp = requireLampLike(reqVO.getChipId().trim());
+            SliderMotionStateService.SliderStateSnapshot snapshot = sliderMotionStateService.getSnapshot(
+                    sliderLamp.getChipId(),
+                    sliderLamp.getStoreId()
+            );
+            if (Math.abs(snapshot.targetPositionMm() - reqVO.getTargetMm())
+                    > SLIDER_STATE_RECONCILIATION_TOLERANCE_MM) {
+                log.warn("stale slider status ignored, chipId={}, expectedTargetMm={}, actualTargetMm={}",
+                        sliderLamp.getChipId(), snapshot.targetPositionMm(), reqVO.getTargetMm());
+                return;
+            }
+            sliderMotionStateService.completeMotion(
+                    sliderLamp.getChipId(),
+                    sliderLamp.getStoreId(),
+                    reqVO.getTargetMm()
+            );
         } catch (RuntimeException e) {
-            log.warn("camera capture command send failed, taskId={}", taskId, e);
-            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
-            return;
+            log.warn("slider status reconciliation failed, chipId={}, targetMm={}",
+                    reqVO.getChipId(), reqVO.getTargetMm(), e);
         }
-        if (!captureSent) {
-            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
-            return;
-        }
+    }
 
-        task.setStatus("capturing");
-        task.setMessage("slider arrived; capture command sent");
-        webSocketPushService.pushCamCaptureTask(task, pending.storeId());
-        scheduleCaptureTimeout(taskId);
+    private TimedSliderMotion planSliderMotion(
+            DeviceCamRoiConfigVO config,
+            int targetIndex,
+            DeviceDO sliderLamp,
+            double targetPositionMm) {
+        SliderMotionStateService.SliderStateSnapshot snapshot = sliderMotionStateService.getSnapshot(
+                sliderLamp.getChipId(),
+                sliderLamp.getStoreId()
+        );
+        SliderCalibration calibration = resolveSliderCalibration(config, targetIndex, snapshot.speedMode());
+        long delayMs = SliderMotionEstimator.estimateDelayMs(
+                snapshot.currentPositionMm(),
+                targetPositionMm,
+                calibration.distanceMm(),
+                calibration.timeSeconds()
+        );
+        LocalDateTime startedAt = LocalDateTime.now();
+        long travelMs = Math.max(1L, delayMs - SliderMotionEstimator.SAFETY_MARGIN_MS);
+        return new TimedSliderMotion(
+                snapshot.currentPositionMm(),
+                targetPositionMm,
+                snapshot.speedMode(),
+                startedAt,
+                startedAt.plusNanos(TimeUnit.MILLISECONDS.toNanos(travelMs)),
+                delayMs
+        );
+    }
+
+    private void beginSliderMotion(DeviceDO sliderLamp, TimedSliderMotion motionPlan) {
+        sliderMotionStateService.beginMotion(
+                sliderLamp.getChipId(),
+                sliderLamp.getStoreId(),
+                motionPlan.currentPositionMm(),
+                motionPlan.targetPositionMm(),
+                motionPlan.speedMode(),
+                motionPlan.startedAt(),
+                motionPlan.motionEndAt()
+        );
+    }
+
+    private void validateBatchMotionCalibration(
+            DeviceCamRoiConfigVO config,
+            DeviceDO sliderLamp,
+            List<BatchCaptureTarget> targets) {
+        SliderMotionStateService.SliderStateSnapshot snapshot = sliderMotionStateService.getSnapshot(
+                sliderLamp.getChipId(),
+                sliderLamp.getStoreId()
+        );
+        for (BatchCaptureTarget target : targets) {
+            SliderCalibration calibration = resolveSliderCalibration(
+                    config,
+                    target.targetIndex(),
+                    snapshot.speedMode()
+            );
+            SliderMotionEstimator.estimateDelayMs(
+                    snapshot.currentPositionMm(),
+                    target.sliderTargetMm(),
+                    calibration.distanceMm(),
+                    calibration.timeSeconds()
+            );
+        }
     }
 
     private List<BatchCaptureTarget> buildBatchCaptureTargets(DeviceCamRoiConfigVO config) {
@@ -617,7 +659,23 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             task = context.batch().getTasks().get(index);
             target = context.targets().get(index);
             task.setStatus("waiting_motion");
-            task.setMessage("waiting for slider arrival");
+            task.setMessage("waiting for estimated slider motion time");
+        }
+
+        DeviceDO sliderLamp = requireLampLike(context.sliderLampChipId());
+        TimedSliderMotion motionPlan;
+        try {
+            motionPlan = planSliderMotion(
+                    context.config(),
+                    target.targetIndex(),
+                    sliderLamp,
+                    target.sliderTargetMm()
+            );
+        } catch (RuntimeException e) {
+            log.warn("batch slider motion planning failed, batchId={}, taskId={}",
+                    context.batch().getBatchId(), task.getTaskId(), e);
+            failBatchPhysicalTask(task, "motion_config_invalid", e.getMessage());
+            return;
         }
 
         String uploadToken = captureUploadTokens.get(task.getTaskId());
@@ -650,8 +708,17 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             failBatchPhysicalTask(task, "motion_command_failed", "slider command send failed");
             return;
         }
+        try {
+            beginSliderMotion(sliderLamp, motionPlan);
+        } catch (RuntimeException e) {
+            log.warn("batch slider state save failed, batchId={}, taskId={}",
+                    context.batch().getBatchId(), task.getTaskId(), e);
+            pendingCaptureMotions.remove(task.getTaskId(), pending);
+            failBatchPhysicalTask(task, "motion_state_failed", "slider position state save failed");
+            return;
+        }
         webSocketPushService.pushCamCaptureTask(task, context.storeId());
-        scheduleMotionTimeout(task.getTaskId());
+        scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
     }
 
     private void advanceCaptureBatch(DeviceCamCaptureTaskRespVO completedTask) {
@@ -705,7 +772,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
         PendingBatchReturn pending = new PendingBatchReturn(
                 context.sliderLampChipId(),
-                context.targetTwoMm(),
+                context.targetTwo().sliderTargetMm(),
                 context.storeId()
         );
         pendingBatchReturns.put(batch.getBatchId(), pending);
@@ -720,7 +787,22 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         motion.put("type", "arm_position");
         motion.put("source", "camera_batch_return");
         motion.put("taskId", batch.getBatchId());
-        motion.put("slider", context.targetTwoMm());
+        motion.put("slider", context.targetTwo().sliderTargetMm());
+        DeviceDO sliderLamp = requireLampLike(context.sliderLampChipId());
+        TimedSliderMotion motionPlan;
+        try {
+            motionPlan = planSliderMotion(
+                    context.config(),
+                    context.targetTwo().targetIndex(),
+                    sliderLamp,
+                    context.targetTwo().sliderTargetMm()
+            );
+        } catch (RuntimeException e) {
+            log.warn("batch return motion planning failed, batchId={}", batch.getBatchId(), e);
+            pendingBatchReturns.remove(batch.getBatchId(), pending);
+            finishCaptureBatch(context, "return_failed", "failed to plan return to target 2", "error");
+            return;
+        }
         boolean sent;
         try {
             sent = deviceSessionManager.sendToDevice(context.sliderLampChipId(), motion.toString());
@@ -733,22 +815,15 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             finishCaptureBatch(context, "return_failed", "failed to return to target 2", "error");
             return;
         }
-        scheduleBatchReturnTimeout(batch.getBatchId());
-    }
-
-    private void handleBatchReturnArrival(
-            DeviceSliderStatusReqVO reqVO,
-            String batchId,
-            PendingBatchReturn pending) {
-        if (!sameChipId(reqVO.getChipId(), pending.sliderLampChipId())
-                || Math.abs(reqVO.getTargetMm() - pending.targetMm()) > SLIDER_ARRIVAL_TOLERANCE_MM
-                || !pendingBatchReturns.remove(batchId, pending)) {
+        try {
+            beginSliderMotion(sliderLamp, motionPlan);
+        } catch (RuntimeException e) {
+            log.warn("batch return slider state save failed, batchId={}", batch.getBatchId(), e);
+            pendingBatchReturns.remove(batch.getBatchId(), pending);
+            finishCaptureBatch(context, "return_failed", "failed to save slider return state", "error");
             return;
         }
-        CaptureBatchContext context = batchContexts.get(batchId);
-        if (context != null) {
-            finishCaptureBatch(context, "completed", "batch capture completed at target 2", "batch_complete");
-        }
+        scheduleTimedBatchReturn(batch.getBatchId(), motionPlan.delayMs());
     }
 
     private void finishCaptureBatch(
@@ -953,16 +1028,16 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return new FileSystemResource(path);
     }
 
-    private void scheduleMotionTimeout(String taskId) {
-        captureTimeoutExecutor.schedule(() -> timeoutMotionTask(taskId), MOTION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    private void scheduleTimedCapture(String taskId, long delayMs) {
+        captureTimeoutExecutor.schedule(() -> triggerTimedCapture(taskId), delayMs, TimeUnit.MILLISECONDS);
     }
 
     private void scheduleCaptureTimeout(String taskId) {
         captureTimeoutExecutor.schedule(() -> timeoutCaptureTask(taskId), CAPTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
-    private void scheduleBatchReturnTimeout(String batchId) {
-        captureTimeoutExecutor.schedule(() -> timeoutBatchReturn(batchId), MOTION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    private void scheduleTimedBatchReturn(String batchId, long delayMs) {
+        captureTimeoutExecutor.schedule(() -> finishTimedBatchReturn(batchId), delayMs, TimeUnit.MILLISECONDS);
     }
 
     private void scheduleTaskCleanup(String taskId) {
@@ -986,13 +1061,52 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }, 5, TimeUnit.MINUTES);
     }
 
-    private void timeoutMotionTask(String taskId) {
+    private void triggerTimedCapture(String taskId) {
         DeviceCamCaptureTaskRespVO task = taskCache.get(taskId);
         PendingCaptureMotion pending = pendingCaptureMotions.remove(taskId);
         if (task == null || pending == null || !"waiting_motion".equals(task.getStatus())) {
             return;
         }
-        failCaptureTask(task, "motion_timeout", "slider arrival timeout", pending.storeId());
+        try {
+            sliderMotionStateService.completeMotion(
+                    pending.sliderLampChipId(),
+                    pending.storeId(),
+                    pending.sliderTargetMm()
+            );
+        } catch (RuntimeException e) {
+            log.warn("slider state completion failed, taskId={}", taskId, e);
+        }
+        if (!deviceSessionManager.isOnline(pending.camChipId())) {
+            failCaptureTask(task, "camera_offline", "estimated slider time elapsed but camera is offline", pending.storeId());
+            return;
+        }
+
+        ObjectNode capture = objectMapper.createObjectNode();
+        capture.put("type", "cameraCapture");
+        capture.put("taskId", taskId);
+        capture.put("camChipId", pending.camChipId());
+        capture.put("targetChipId", pending.targetChipId());
+        capture.put("targetIndex", pending.targetIndex());
+        capture.put("motionReady", true);
+        capture.put("uploadUrl", "/device/cam/capture-task/" + taskId + "/photo");
+        capture.put("uploadToken", pending.uploadToken());
+        boolean captureSent;
+        try {
+            captureSent = deviceSessionManager.sendToDevice(pending.camChipId(), capture.toString());
+        } catch (RuntimeException e) {
+            log.warn("camera capture command send failed, taskId={}", taskId, e);
+            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
+            return;
+        }
+        if (!captureSent) {
+            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
+            return;
+        }
+
+        task.setStatus("capturing");
+        task.setMessage("estimated slider time elapsed; capture command sent");
+        webSocketPushService.pushCamCaptureTask(task, pending.storeId());
+        scheduleCaptureTimeout(taskId);
     }
 
     private void timeoutCaptureTask(String taskId) {
@@ -1026,13 +1140,22 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
     }
 
-    private void timeoutBatchReturn(String batchId) {
+    private void finishTimedBatchReturn(String batchId) {
         PendingBatchReturn pending = pendingBatchReturns.remove(batchId);
         CaptureBatchContext context = batchContexts.get(batchId);
         if (pending == null || context == null || !"returning_target_2".equals(context.batch().getStatus())) {
             return;
         }
-        finishCaptureBatch(context, "return_failed", "return to target 2 timeout", "error");
+        try {
+            sliderMotionStateService.completeMotion(
+                    pending.sliderLampChipId(),
+                    pending.storeId(),
+                    pending.targetMm()
+            );
+        } catch (RuntimeException e) {
+            log.warn("batch return slider state completion failed, batchId={}", batchId, e);
+        }
+        finishCaptureBatch(context, "completed", "batch capture completed at target 2", "batch_complete");
     }
 
     private void claimCaptureSlot(Map<String, String> slots, String chipId, String taskId, String message) {
@@ -1387,6 +1510,16 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             pushTracking(candidate, "error", "slider command send failed", cam.getStoreId());
             return;
         }
+        try {
+            sliderMotionStateService.recordCommandedPosition(
+                    sliderLamp.getChipId(),
+                    sliderLamp.getStoreId(),
+                    sliderTargetMm
+            );
+        } catch (RuntimeException e) {
+            log.warn("tracking slider position state save failed, camChipId={}, lampChipId={}",
+                    cam.getChipId(), sliderLamp.getChipId(), e);
+        }
 
         String camCommand = buildCameraStartTrackingCommand(
                 cam.getChipId(),
@@ -1614,6 +1747,19 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     ) {
     }
 
+    private record TimedSliderMotion(
+            double currentPositionMm,
+            double targetPositionMm,
+            String speedMode,
+            LocalDateTime startedAt,
+            LocalDateTime motionEndAt,
+            long delayMs
+    ) {
+    }
+
+    private record SliderCalibration(double distanceMm, double timeSeconds) {
+    }
+
     private record PendingBatchReturn(
             String sliderLampChipId,
             double targetMm,
@@ -1626,7 +1772,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         private final List<BatchCaptureTarget> targets;
         private final String sliderLampChipId;
         private final Long storeId;
-        private final double targetTwoMm;
+        private final DeviceCamRoiConfigVO config;
+        private final BatchCaptureTarget targetTwo;
         private int currentIndex = -1;
 
         private CaptureBatchContext(
@@ -1634,12 +1781,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 List<BatchCaptureTarget> targets,
                 String sliderLampChipId,
                 Long storeId,
-                double targetTwoMm) {
+                DeviceCamRoiConfigVO config,
+                BatchCaptureTarget targetTwo) {
             this.batch = batch;
             this.targets = targets;
             this.sliderLampChipId = sliderLampChipId;
             this.storeId = storeId;
-            this.targetTwoMm = targetTwoMm;
+            this.config = config;
+            this.targetTwo = targetTwo;
         }
 
         private DeviceCamCaptureBatchRespVO batch() {
@@ -1658,8 +1807,12 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return storeId;
         }
 
-        private double targetTwoMm() {
-            return targetTwoMm;
+        private DeviceCamRoiConfigVO config() {
+            return config;
+        }
+
+        private BatchCaptureTarget targetTwo() {
+            return targetTwo;
         }
 
         private int currentIndex() {
@@ -1754,6 +1907,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             roi.setH(clamp01(roi.getH()));
         }
         value.setSliderPresets(normalizeSliderPresetMap(value));
+        value.setSliderMoveTimes(normalizeSliderMoveTimeMap(value));
         value.setConfigured(value.getRois().size() >= 3 && value.getRois().stream().limit(3).allMatch(this::isConfiguredRoi));
         return value;
     }
@@ -1769,9 +1923,29 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             if (slider == null) {
                 slider = legacySlider(config.getLegacyTrackingPresets(), key);
             }
-            normalized.put(key, (double) Math.round(clampDouble(slider, 0D, 1200D, 0D)));
+            normalized.put(key, (double) Math.round(clampDouble(slider, 0D, 2500D, 0D)));
         }
         return normalized;
+    }
+
+    private Map<String, DeviceCamSliderMoveTimeVO> normalizeSliderMoveTimeMap(DeviceCamRoiConfigVO config) {
+        Map<String, DeviceCamSliderMoveTimeVO> normalized = new LinkedHashMap<>();
+        Map<String, DeviceCamSliderMoveTimeVO> source = config.getSliderMoveTimes();
+        for (int targetIndex = 1; targetIndex <= BATCH_TARGET_COUNT; targetIndex++) {
+            String key = String.valueOf(targetIndex);
+            DeviceCamSliderMoveTimeVO input = source == null ? null : source.get(key);
+            DeviceCamSliderMoveTimeVO output = new DeviceCamSliderMoveTimeVO();
+            output.setSlow(normalizeMoveTime(input == null ? null : input.getSlow()));
+            output.setNormal(normalizeMoveTime(input == null ? null : input.getNormal()));
+            output.setFast(normalizeMoveTime(input == null ? null : input.getFast()));
+            normalized.put(key, output);
+        }
+        return normalized;
+    }
+
+    private double normalizeMoveTime(Double value) {
+        double normalized = clampDouble(value, 0D, 3600D, 0D);
+        return Math.round(normalized * 1000D) / 1000D;
     }
 
     private Double legacySlider(
@@ -1789,9 +1963,52 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return (double) Math.round(clampDouble(
                 presets == null ? null : presets.get(key),
                 0D,
-                1200D,
+                2500D,
                 0D
         ));
+    }
+
+    private SliderCalibration resolveSliderCalibration(
+            DeviceCamRoiConfigVO config,
+            Integer targetIndex,
+            String speedMode) {
+        String key = String.valueOf(normalizeTargetIndex(targetIndex));
+        double targetDistanceMm = resolveSliderPreset(config, targetIndex);
+        Double targetTimeSeconds = sliderMoveTime(config, key, speedMode);
+        if (targetDistanceMm > 0D && isPositiveFinite(targetTimeSeconds)) {
+            return new SliderCalibration(targetDistanceMm, targetTimeSeconds);
+        }
+        if (targetDistanceMm > 0D) {
+            throw new ServiceException("请先填写区域 " + key + " 的 " + speedMode + " 滑轨移动时间");
+        }
+
+        SliderCalibration fallback = null;
+        for (int index = 1; index <= BATCH_TARGET_COUNT; index++) {
+            String candidateKey = String.valueOf(index);
+            double candidateDistanceMm = resolveSliderPreset(config, index);
+            Double candidateTimeSeconds = sliderMoveTime(config, candidateKey, speedMode);
+            if (candidateDistanceMm <= 0D || !isPositiveFinite(candidateTimeSeconds)) {
+                continue;
+            }
+            if (fallback == null || candidateDistanceMm > fallback.distanceMm()) {
+                fallback = new SliderCalibration(candidateDistanceMm, candidateTimeSeconds);
+            }
+        }
+        if (fallback == null) {
+            throw new ServiceException("目标为 0 mm 时，请至少填写一个非零区域的 " + speedMode + " 滑轨移动时间");
+        }
+        return fallback;
+    }
+
+    private Double sliderMoveTime(DeviceCamRoiConfigVO config, String key, String speedMode) {
+        DeviceCamSliderMoveTimeVO times = config.getSliderMoveTimes() == null
+                ? null
+                : config.getSliderMoveTimes().get(key);
+        return times == null ? null : times.timeFor(speedMode);
+    }
+
+    private boolean isPositiveFinite(Double value) {
+        return value != null && Double.isFinite(value) && value > 0D;
     }
 
     private boolean isConfiguredRoi(DeviceCamRoiItemVO roi) {
@@ -1804,6 +2021,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             DeviceCamRoiConfigVO empty = new DeviceCamRoiConfigVO();
             empty.setCamChipId(camChipId);
             empty.setSliderPresets(normalizeSliderPresetMap(empty));
+            empty.setSliderMoveTimes(normalizeSliderMoveTimeMap(empty));
             empty.setConfigured(false);
             return empty;
         }

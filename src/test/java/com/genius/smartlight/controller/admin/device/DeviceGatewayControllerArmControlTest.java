@@ -9,6 +9,7 @@ import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.StoreMapper;
 import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.device.DeviceControlService;
+import com.genius.smartlight.service.device.SliderMotionStateService;
 import com.genius.smartlight.vo.device.DeviceArmControlReqVO;
 import com.genius.smartlight.websocket.DeviceAnnounceNotifier;
 import com.genius.smartlight.websocket.DeviceSessionManager;
@@ -36,12 +37,14 @@ class DeviceGatewayControllerArmControlTest {
     private StoreMapper storeMapper;
     private DeviceMapper deviceMapper;
     private DeviceSessionManager deviceSessionManager;
+    private SliderMotionStateService sliderMotionStateService;
 
     @BeforeEach
     void setUp() {
         deviceMapper = mock(DeviceMapper.class);
         storeMapper = mock(StoreMapper.class);
         deviceSessionManager = mock(DeviceSessionManager.class);
+        sliderMotionStateService = mock(SliderMotionStateService.class);
 
         StoreDO store = new StoreDO();
         store.setId(7L);
@@ -62,7 +65,8 @@ class DeviceGatewayControllerArmControlTest {
                 deviceSessionManager,
                 mock(DeviceAnnounceNotifier.class),
                 objectMapper,
-                mock(DeviceControlService.class)
+                mock(DeviceControlService.class),
+                sliderMotionStateService
         );
     }
 
@@ -92,6 +96,34 @@ class DeviceGatewayControllerArmControlTest {
             assertThatThrownBy(() -> controller.armControl(CHIP_ID, positionRequest(90.1f)))
                     .isInstanceOf(ServiceException.class)
                     .hasMessageContaining("pan range must be -90.0 to 90.0 degrees");
+        }
+    }
+
+    @Test
+    void armPosition_accepts2500MmAndPersistsBackendPosition() {
+        DeviceArmControlReqVO request = new DeviceArmControlReqVO();
+        request.setType("arm_position");
+        request.setSlider(2500f);
+
+        try (MockedStatic<SecurityUtils> securityUtils = mockStatic(SecurityUtils.class)) {
+            securityUtils.when(SecurityUtils::getCurrentUserId).thenReturn(42L);
+            controller.armControl(CHIP_ID, request);
+        }
+
+        verify(sliderMotionStateService).recordCommandedPosition(CHIP_ID, 7L, 2500D);
+    }
+
+    @Test
+    void armPosition_rejectsSliderAbove2500Mm() {
+        DeviceArmControlReqVO request = new DeviceArmControlReqVO();
+        request.setType("arm_position");
+        request.setSlider(2500.1f);
+
+        try (MockedStatic<SecurityUtils> securityUtils = mockStatic(SecurityUtils.class)) {
+            securityUtils.when(SecurityUtils::getCurrentUserId).thenReturn(42L);
+            assertThatThrownBy(() -> controller.armControl(CHIP_ID, request))
+                    .isInstanceOf(ServiceException.class)
+                    .hasMessageContaining("2500.0 mm");
         }
     }
 

@@ -1,14 +1,18 @@
 package com.genius.smartlight.service.device.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.DurationRecordMapper;
 import com.genius.smartlight.service.ai.AiService;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.service.store.CurrentStoreService;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchReqVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchRespVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
@@ -19,28 +23,35 @@ import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
 import com.genius.smartlight.websocket.DeviceSessionManager;
 import com.genius.smartlight.websocket.WebSocketPushService;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.springframework.mock.web.MockMultipartFile;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import org.mockito.ArgumentCaptor;
-import org.mockito.InOrder;
 
 class DeviceCamServiceImplTest {
 
@@ -52,15 +63,22 @@ class DeviceCamServiceImplTest {
     private CurrentStoreService currentStoreService;
     private WebSocketPushService webSocketPushService;
     private DeviceSessionManager deviceSessionManager;
+    private AiService aiService;
+    private final List<Path> testUploadPaths = new ArrayList<>();
     private DeviceCamServiceImpl service;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @BeforeEach
     void setUp() {
+        TableInfoHelper.initTableInfo(
+                new MapperBuilderAssistant(new MybatisConfiguration(), "device-cam-service-test"),
+                DeviceDO.class
+        );
         deviceMapper = mock(DeviceMapper.class);
         currentStoreService = mock(CurrentStoreService.class);
         webSocketPushService = mock(WebSocketPushService.class);
         deviceSessionManager = mock(DeviceSessionManager.class);
+        aiService = mock(AiService.class);
 
         service = new DeviceCamServiceImpl(
                 deviceMapper,
@@ -69,7 +87,7 @@ class DeviceCamServiceImplTest {
                 deviceSessionManager,
                 mock(PersonFlowRecordService.class),
                 mock(DurationRecordMapper.class),
-                mock(AiService.class),
+                aiService,
                 objectMapper
         );
 
@@ -93,6 +111,10 @@ class DeviceCamServiceImplTest {
         try {
             Files.deleteIfExists(manualConfigPath());
             Files.deleteIfExists(defaultConfigPath());
+            for (Path uploadPath : testUploadPaths) {
+                Files.deleteIfExists(uploadPath);
+            }
+            testUploadPaths.clear();
         } catch (Exception ignored) {
             // The unique test config must not mask the assertion result during cleanup.
         }
@@ -107,20 +129,17 @@ class DeviceCamServiceImplTest {
 
         assertThat(result.getTrackingStatus()).isEqualTo("tracking");
         InOrder commandOrder = inOrder(deviceSessionManager);
-        ArgumentCaptor<String> sliderPayloadCaptor = ArgumentCaptor.forClass(String.class);
         commandOrder.verify(deviceSessionManager)
-                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), sliderPayloadCaptor.capture());
-        JsonNode sliderCommand = objectMapper.readTree(sliderPayloadCaptor.getValue());
-        assertThat(sliderCommand.path("type").asText()).isEqualTo("arm_position");
-        assertThat(sliderCommand.path("source").asText()).isEqualTo("camera_tracking");
-        assertThat(sliderCommand.path("slider").asDouble()).isEqualTo(600.0);
-
-        ArgumentCaptor<String> lampPayloadCaptor = ArgumentCaptor.forClass(String.class);
+                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), org.mockito.ArgumentMatchers.argThat(
+                        payload -> payload.contains("\"type\":\"arm_position\"")
+                                && payload.contains("\"source\":\"camera_tracking\"")
+                                && payload.contains("\"slider\":600.0")
+                ));
         commandOrder.verify(deviceSessionManager)
-                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), lampPayloadCaptor.capture());
-        JsonNode lampCommand = objectMapper.readTree(lampPayloadCaptor.getValue());
-        assertThat(lampCommand.path("type").asText()).isEqualTo("lampTrackingStart");
-        assertThat(lampCommand.path("camChipId").asText()).isEqualTo(MANUAL_CAM_CHIP_ID);
+                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), org.mockito.ArgumentMatchers.argThat(
+                        payload -> payload.contains("\"type\":\"lampTrackingStart\"")
+                                && payload.contains("\"camChipId\":\"" + MANUAL_CAM_CHIP_ID + "\"")
+                ));
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         commandOrder.verify(deviceSessionManager)
@@ -384,6 +403,110 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
+    void createCaptureBatch_ordersThreeTargetsBySliderPosition() throws Exception {
+        writeBatchCaptureConfig();
+
+        DeviceCamCaptureBatchReqVO request = new DeviceCamCaptureBatchReqVO();
+        request.setCamChipId("CAM-001");
+
+        DeviceCamCaptureBatchRespVO batch = service.createCaptureBatch(request);
+
+        assertThat(batch.getTasks()).extracting(DeviceCamCaptureTaskRespVO::getTargetIndex)
+                .containsExactly(3, 1, 2);
+        assertThat(batch.getTasks()).extracting(DeviceCamCaptureTaskRespVO::getSequence)
+                .containsExactly(1, 2, 3);
+        assertThat(batch.getTasks()).extracting(DeviceCamCaptureTaskRespVO::getStatus)
+                .containsExactly("waiting_motion", "queued", "queued");
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
+        JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
+        assertThat(payload.path("source").asText()).isEqualTo("camera_capture");
+        assertThat(payload.path("taskId").asText()).isEqualTo(batch.getTasks().get(0).getTaskId());
+        assertThat(payload.path("slider").asDouble()).isEqualTo(120.0);
+    }
+
+    @Test
+    void batchUpload_returnsImageReceivedAndStartsNextMotionBeforeAiFinishes() throws Exception {
+        writeBatchCaptureConfig();
+        CountDownLatch aiStarted = new CountDownLatch(1);
+        CountDownLatch releaseAi = new CountDownLatch(1);
+        when(aiService.fabricRecognize(eq("LAMP-003"), any())).thenAnswer(invocation -> {
+            aiStarted.countDown();
+            releaseAi.await(5, TimeUnit.SECONDS);
+            return null;
+        });
+
+        DeviceCamCaptureBatchReqVO request = new DeviceCamCaptureBatchReqVO();
+        request.setCamChipId("CAM-001");
+        DeviceCamCaptureBatchRespVO batch = service.createCaptureBatch(request);
+        DeviceCamCaptureTaskRespVO first = batch.getTasks().get(0);
+        service.reportSliderStatus(sliderArrival(first, SLIDER_LAMP_CHIP_ID, 120.0));
+
+        DeviceCamCaptureTaskRespVO response = service.uploadCapturePhoto(
+                first.getTaskId(),
+                new MockMultipartFile("file", "zone-3.jpg", "image/jpeg", new byte[]{1, 2, 3})
+        );
+        rememberTestUpload(response);
+
+        assertThat(response.getStatus()).isEqualTo("image_received");
+        assertThat(aiStarted.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(batch.getTasks().get(1).getStatus()).isEqualTo("waiting_motion");
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager, times(2))
+                .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
+        JsonNode nextMotion = objectMapper.readTree(payloadCaptor.getAllValues().get(1));
+        assertThat(nextMotion.path("taskId").asText()).isEqualTo(batch.getTasks().get(1).getTaskId());
+        assertThat(nextMotion.path("slider").asDouble()).isEqualTo(320.0);
+
+        releaseAi.countDown();
+    }
+
+    @Test
+    void batchReturnsToTargetTwoAfterThirdImageAndCompletesOnArrival() throws Exception {
+        writeBatchCaptureConfig();
+        DeviceCamCaptureBatchReqVO request = new DeviceCamCaptureBatchReqVO();
+        request.setCamChipId("CAM-001");
+        DeviceCamCaptureBatchRespVO batch = service.createCaptureBatch(request);
+
+        double[] orderedPositions = {120.0, 320.0, 640.0};
+        for (int index = 0; index < batch.getTasks().size(); index++) {
+            DeviceCamCaptureTaskRespVO task = batch.getTasks().get(index);
+            service.reportSliderStatus(sliderArrival(task, SLIDER_LAMP_CHIP_ID, orderedPositions[index]));
+            DeviceCamCaptureTaskRespVO upload = service.uploadCapturePhoto(
+                    task.getTaskId(),
+                    new MockMultipartFile("file", "zone-" + task.getTargetIndex() + ".jpg",
+                            "image/jpeg", new byte[]{1, 2, 3})
+            );
+            rememberTestUpload(upload);
+            assertThat(upload.getStatus()).isEqualTo("image_received");
+        }
+
+        assertThat(batch.getStatus()).isEqualTo("returning_target_2");
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager, times(4))
+                .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
+        JsonNode returnMotion = objectMapper.readTree(payloadCaptor.getAllValues().get(3));
+        assertThat(returnMotion.path("source").asText()).isEqualTo("camera_batch_return");
+        assertThat(returnMotion.path("taskId").asText()).isEqualTo(batch.getBatchId());
+        assertThat(returnMotion.path("slider").asDouble()).isEqualTo(640.0);
+        verify(deviceSessionManager, times(3)).sendToDevice(eq("CAM-001"), any());
+        verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-001"), any());
+        verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-002"), any());
+        verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-003"), any());
+
+        DeviceSliderStatusReqVO returnArrival = new DeviceSliderStatusReqVO();
+        returnArrival.setChipId(SLIDER_LAMP_CHIP_ID);
+        returnArrival.setTaskId(batch.getBatchId());
+        returnArrival.setStatus("arrived");
+        returnArrival.setTargetMm(640.0);
+        service.reportSliderStatus(returnArrival);
+
+        assertThat(batch.getStatus()).isEqualTo("completed");
+    }
+
+    @Test
     void cameraStartTrackingCommand_usesHttpWithoutPortOrLegacyTuningFields() throws Exception {
         String json = service.buildCameraStartTrackingCommand(
                 "CAM-001", "LAMP-001", 2, "192.168.1.88"
@@ -559,8 +682,42 @@ class DeviceCamServiceImplTest {
         }
     }
 
+    private void writeBatchCaptureConfig() throws Exception {
+        DeviceCamRoiItemVO target1 = new DeviceCamRoiItemVO();
+        target1.setTargetIndex(1);
+        target1.setTargetChipId("LAMP-001");
+        DeviceCamRoiItemVO target2 = new DeviceCamRoiItemVO();
+        target2.setTargetIndex(2);
+        target2.setTargetChipId("LAMP-002");
+        DeviceCamRoiItemVO target3 = new DeviceCamRoiItemVO();
+        target3.setTargetIndex(3);
+        target3.setTargetChipId("LAMP-003");
+
+        DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
+        config.setCamChipId("CAM-001");
+        config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
+        config.setConfigured(true);
+        config.setRois(List.of(target1, target2, target3));
+        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));
+        objectMapper.writeValue(defaultConfigPath().toFile(), config);
+
+        stubDevices(
+                device("CAM-001", "cam"),
+                device("LAMP-001", "lamp"),
+                device("LAMP-002", "lamp"),
+                device("LAMP-003", "lamp"),
+                device(SLIDER_LAMP_CHIP_ID, "lamp")
+        );
+    }
+
     private Path defaultConfigPath() {
         return Path.of("data", "cam-config", "CAM-001.json").toAbsolutePath().normalize();
+    }
+
+    private void rememberTestUpload(DeviceCamCaptureTaskRespVO task) {
+        if (task.getImageName() != null) {
+            testUploadPaths.add(Path.of("data", "cam-upload", task.getImageName()).toAbsolutePath().normalize());
+        }
     }
 
     private DeviceDO device(String chipId, String deviceType) {
@@ -577,14 +734,17 @@ class DeviceCamServiceImplTest {
         for (DeviceDO device : devices) {
             byChipId.put(device.getChipId(), device);
         }
-        when(deviceMapper.selectOne(any(LambdaQueryWrapper.class))).thenAnswer(invocation -> {
+        org.mockito.stubbing.Answer<DeviceDO> answer = invocation -> {
             LambdaQueryWrapper<DeviceDO> wrapper = invocation.getArgument(0);
+            wrapper.getSqlSegment();
             return wrapper.getParamNameValuePairs().values().stream()
                     .map(String::valueOf)
                     .map(byChipId::get)
                     .filter(java.util.Objects::nonNull)
                     .findFirst()
                     .orElse(null);
-        });
+        };
+        doAnswer(answer).when(deviceMapper).selectOne(any(LambdaQueryWrapper.class));
+        doAnswer(answer).when(deviceMapper).selectOne(any(LambdaQueryWrapper.class), anyBoolean());
     }
 }

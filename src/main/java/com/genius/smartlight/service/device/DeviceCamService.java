@@ -2,6 +2,8 @@ package com.genius.smartlight.service.device;
 
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchReqVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchRespVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceRespVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
@@ -36,6 +38,8 @@ public interface DeviceCamService {
     DeviceTrackingStatusRespVO stopTrackingManually(DeviceCamTrackingControlReqVO reqVO);
 
     DeviceCamCaptureTaskRespVO createCaptureTask(DeviceCamCaptureTaskReqVO reqVO);
+
+    DeviceCamCaptureBatchRespVO createCaptureBatch(DeviceCamCaptureBatchReqVO reqVO);
 
     void reportSliderStatus(DeviceSliderStatusReqVO reqVO);
 

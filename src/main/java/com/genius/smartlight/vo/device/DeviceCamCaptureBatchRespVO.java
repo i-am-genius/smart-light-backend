@@ -3,18 +3,15 @@ package com.genius.smartlight.vo.device;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 @Data
-public class DeviceCamCaptureTaskRespVO {
-    private String taskId;
+public class DeviceCamCaptureBatchRespVO {
     private String batchId;
-    private Integer sequence;
     private String camChipId;
-    private String targetChipId;
-    private Integer targetIndex;
     private String status;
     private String message;
-    private String imageName;
-    private String photoUrl;
+    private List<DeviceCamCaptureTaskRespVO> tasks = new ArrayList<>();
     private LocalDateTime createTime;
 }

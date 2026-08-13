@@ -2,6 +2,8 @@ package com.genius.smartlight.controller.admin.device;
 
 import com.genius.smartlight.common.CommonResult;
 import com.genius.smartlight.service.device.DeviceCamService;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchReqVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchRespVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
@@ -103,6 +105,13 @@ public class DeviceCamController {
     public CommonResult<DeviceCamCaptureTaskRespVO> createCaptureTask(
             @Valid @RequestBody DeviceCamCaptureTaskReqVO reqVO) {
         return CommonResult.success(deviceCamService.createCaptureTask(reqVO));
+    }
+
+    @Operation(summary = "按滑轨位置依次创建三个区域的 cam 批量拍摄任务")
+    @PostMapping("/cam/capture-batch")
+    public CommonResult<DeviceCamCaptureBatchRespVO> createCaptureBatch(
+            @Valid @RequestBody DeviceCamCaptureBatchReqVO reqVO) {
+        return CommonResult.success(deviceCamService.createCaptureBatch(reqVO));
     }
 
     @Operation(summary = "cam 上传服装拍摄照片")

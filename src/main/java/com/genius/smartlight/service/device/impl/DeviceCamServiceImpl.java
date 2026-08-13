@@ -13,6 +13,8 @@ import com.genius.smartlight.service.ai.AiService;
 import com.genius.smartlight.service.device.DeviceCamService;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.service.store.CurrentStoreService;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchReqVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureBatchRespVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
@@ -42,7 +44,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -61,6 +65,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -75,6 +80,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
     private static final int MOTION_TIMEOUT_SECONDS = 45;
     private static final int CAPTURE_TIMEOUT_SECONDS = 45;
+    private static final int BATCH_TARGET_COUNT = 3;
     private static final double SLIDER_ARRIVAL_TOLERANCE_MM = 0.05D;
 
     private final DeviceMapper deviceMapper;
@@ -95,6 +101,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private final Map<String, DeviceCamPresenceRespVO> presenceCache = new ConcurrentHashMap<>();
     private final Map<String, DeviceCamStatusRespVO> statusCache = new ConcurrentHashMap<>();
     private final Map<String, DeviceCamCaptureTaskRespVO> taskCache = new ConcurrentHashMap<>();
+    private final Map<String, DeviceCamCaptureBatchRespVO> batchCache = new ConcurrentHashMap<>();
+    private final Map<String, CaptureBatchContext> batchContexts = new ConcurrentHashMap<>();
+    private final Map<String, String> captureBatchByTask = new ConcurrentHashMap<>();
     private final Map<String, DeviceLampClothStateRespVO> clothStateCache = new ConcurrentHashMap<>();
     private final Map<String, DeviceTrackingStatusRespVO> trackingCache = new ConcurrentHashMap<>();
     private final Map<String, String> activeTrackingByCam = new ConcurrentHashMap<>();
@@ -104,8 +113,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private final Map<String, String> activeCaptureTaskBySliderLamp = new ConcurrentHashMap<>();
     private final Map<String, String> activeCaptureTaskByCam = new ConcurrentHashMap<>();
     private final Map<String, String> captureSliderLampByTask = new ConcurrentHashMap<>();
+    private final Map<String, PendingBatchReturn> pendingBatchReturns = new ConcurrentHashMap<>();
     private final ScheduledExecutorService captureTimeoutExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "cam-capture-timeout");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final ExecutorService captureAiExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "cam-capture-ai");
         thread.setDaemon(true);
         return thread;
     });
@@ -418,12 +433,97 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     @Override
+    public DeviceCamCaptureBatchRespVO createCaptureBatch(DeviceCamCaptureBatchReqVO reqVO) {
+        DeviceDO cam = requireCamForCurrentStore(reqVO.getCamChipId());
+        if (!deviceSessionManager.isOnline(cam.getChipId())) {
+            throw new ServiceException("cam 离线，无法创建批量拍摄任务");
+        }
+        DeviceCamRoiConfigVO config = readRoiConfig(cam.getChipId());
+        DeviceDO sliderLamp = requireSliderLampForCurrentStore(config);
+        if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
+            throw new ServiceException("滑轨控制灯离线，无法执行批量拍摄");
+        }
+
+        List<BatchCaptureTarget> targets = buildBatchCaptureTargets(config);
+        String batchId = UUID.randomUUID().toString();
+        DeviceCamCaptureBatchRespVO batch = new DeviceCamCaptureBatchRespVO();
+        batch.setBatchId(batchId);
+        batch.setCamChipId(cam.getChipId());
+        batch.setStatus("running");
+        batch.setMessage("batch capture started");
+        batch.setCreateTime(LocalDateTime.now());
+
+        claimCaptureSlot(
+                activeCaptureTaskBySliderLamp,
+                sliderLamp.getChipId(),
+                batchId,
+                "滑轨控制灯已有拍摄任务执行中"
+        );
+        try {
+            claimCaptureSlot(activeCaptureTaskByCam, cam.getChipId(), batchId, "摄像头已有拍摄任务执行中");
+        } catch (RuntimeException e) {
+            activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), batchId);
+            throw e;
+        }
+        captureSliderLampByTask.put(batchId, sliderLamp.getChipId());
+        batchCache.put(batchId, batch);
+
+        try {
+            for (int index = 0; index < targets.size(); index++) {
+                BatchCaptureTarget target = targets.get(index);
+                DeviceCamCaptureTaskRespVO task = new DeviceCamCaptureTaskRespVO();
+                task.setTaskId(UUID.randomUUID().toString());
+                task.setBatchId(batchId);
+                task.setSequence(index + 1);
+                task.setCamChipId(cam.getChipId());
+                task.setTargetChipId(target.targetChipId());
+                task.setTargetIndex(target.targetIndex());
+                task.setStatus("queued");
+                task.setMessage("waiting for previous batch target");
+                task.setCreateTime(LocalDateTime.now());
+                batch.getTasks().add(task);
+                taskCache.put(task.getTaskId(), task);
+                captureBatchByTask.put(task.getTaskId(), batchId);
+                captureUploadTokens.put(task.getTaskId(), UUID.randomUUID().toString().replace("-", ""));
+            }
+
+            double targetTwoMm = targets.stream()
+                    .filter(target -> target.targetIndex() == 2)
+                    .mapToDouble(BatchCaptureTarget::sliderTargetMm)
+                    .findFirst()
+                    .orElseThrow(() -> new ServiceException("区域 2 滑轨预设缺失"));
+            CaptureBatchContext context = new CaptureBatchContext(
+                    batch,
+                    targets,
+                    sliderLamp.getChipId(),
+                    cam.getStoreId(),
+                    targetTwoMm
+            );
+            batchContexts.put(batchId, context);
+            for (DeviceCamCaptureTaskRespVO queuedTask : batch.getTasks()) {
+                webSocketPushService.pushCamCaptureTask(queuedTask, cam.getStoreId());
+            }
+            startBatchTarget(context, 0);
+            return batch;
+        } catch (RuntimeException e) {
+            discardCaptureBatch(batchId);
+            throw e;
+        }
+    }
+
+    @Override
     public void reportSliderStatus(DeviceSliderStatusReqVO reqVO) {
         if (reqVO == null || !"arrived".equalsIgnoreCase(defaultStatus(reqVO.getStatus(), ""))) {
             return;
         }
         String taskId = notBlank(reqVO.getTaskId()) ? reqVO.getTaskId().trim() : null;
         if (taskId == null || !notBlank(reqVO.getChipId()) || reqVO.getTargetMm() == null) {
+            return;
+        }
+
+        PendingBatchReturn pendingReturn = pendingBatchReturns.get(taskId);
+        if (pendingReturn != null) {
+            handleBatchReturnArrival(reqVO, taskId, pendingReturn);
             return;
         }
 
@@ -479,6 +579,202 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         scheduleCaptureTimeout(taskId);
     }
 
+    private List<BatchCaptureTarget> buildBatchCaptureTargets(DeviceCamRoiConfigVO config) {
+        List<DeviceCamRoiItemVO> rois = config.getRois() == null ? List.of() : config.getRois();
+        java.util.ArrayList<BatchCaptureTarget> targets = new java.util.ArrayList<>();
+        for (int targetIndex = 1; targetIndex <= BATCH_TARGET_COUNT; targetIndex++) {
+            int currentIndex = targetIndex;
+            DeviceCamRoiItemVO roi = rois.stream()
+                    .filter(item -> item.getTargetIndex() != null && item.getTargetIndex() == currentIndex)
+                    .findFirst()
+                    .orElseThrow(() -> new ServiceException("区域 " + currentIndex + " 未配置，无法批量拍摄"));
+            if (!notBlank(roi.getTargetChipId())) {
+                throw new ServiceException("区域 " + currentIndex + " 目标灯缺失，无法批量拍摄");
+            }
+            DeviceDO target = requireLampLikeForCurrentStore(roi.getTargetChipId());
+            targets.add(new BatchCaptureTarget(
+                    currentIndex,
+                    target.getChipId(),
+                    resolveSliderPreset(config, currentIndex)
+            ));
+        }
+        targets.sort(Comparator
+                .comparingDouble(BatchCaptureTarget::sliderTargetMm)
+                .thenComparingInt(BatchCaptureTarget::targetIndex));
+        return List.copyOf(targets);
+    }
+
+    private void startBatchTarget(CaptureBatchContext context, int index) {
+        DeviceCamCaptureTaskRespVO task;
+        BatchCaptureTarget target;
+        synchronized (context) {
+            if (!"running".equals(context.batch().getStatus())
+                    || index < 0
+                    || index >= context.targets().size()) {
+                return;
+            }
+            context.setCurrentIndex(index);
+            task = context.batch().getTasks().get(index);
+            target = context.targets().get(index);
+            task.setStatus("waiting_motion");
+            task.setMessage("waiting for slider arrival");
+        }
+
+        String uploadToken = captureUploadTokens.get(task.getTaskId());
+        PendingCaptureMotion pending = new PendingCaptureMotion(
+                task.getCamChipId(),
+                context.sliderLampChipId(),
+                target.targetChipId(),
+                target.targetIndex(),
+                target.sliderTargetMm(),
+                uploadToken,
+                context.storeId()
+        );
+        pendingCaptureMotions.put(task.getTaskId(), pending);
+
+        ObjectNode motion = objectMapper.createObjectNode();
+        motion.put("type", "arm_position");
+        motion.put("source", "camera_capture");
+        motion.put("taskId", task.getTaskId());
+        motion.put("slider", target.sliderTargetMm());
+        boolean sent;
+        try {
+            sent = deviceSessionManager.sendToDevice(context.sliderLampChipId(), motion.toString());
+        } catch (RuntimeException e) {
+            log.warn("batch slider command failed, batchId={}, taskId={}",
+                    context.batch().getBatchId(), task.getTaskId(), e);
+            sent = false;
+        }
+        if (!sent) {
+            pendingCaptureMotions.remove(task.getTaskId(), pending);
+            failBatchPhysicalTask(task, "motion_command_failed", "slider command send failed");
+            return;
+        }
+        webSocketPushService.pushCamCaptureTask(task, context.storeId());
+        scheduleMotionTimeout(task.getTaskId());
+    }
+
+    private void advanceCaptureBatch(DeviceCamCaptureTaskRespVO completedTask) {
+        String batchId = captureBatchByTask.get(completedTask.getTaskId());
+        CaptureBatchContext context = batchId == null ? null : batchContexts.get(batchId);
+        if (context == null) {
+            return;
+        }
+
+        int nextIndex;
+        synchronized (context) {
+            int currentIndex = context.currentIndex();
+            if (currentIndex < 0
+                    || currentIndex >= context.batch().getTasks().size()
+                    || !context.batch().getTasks().get(currentIndex).getTaskId().equals(completedTask.getTaskId())) {
+                return;
+            }
+            nextIndex = currentIndex + 1;
+            context.setCurrentIndex(nextIndex);
+        }
+        if (nextIndex < context.targets().size()) {
+            startBatchTarget(context, nextIndex);
+        } else {
+            startBatchReturn(context);
+        }
+    }
+
+    private void failBatchPhysicalTask(DeviceCamCaptureTaskRespVO task, String status, String message) {
+        task.setStatus(status);
+        task.setMessage(message);
+        captureUploadTokens.remove(task.getTaskId());
+        pendingCaptureMotions.remove(task.getTaskId());
+        String batchId = captureBatchByTask.get(task.getTaskId());
+        CaptureBatchContext context = batchId == null ? null : batchContexts.get(batchId);
+        if (context != null) {
+            webSocketPushService.pushCamCaptureResult(task, context.storeId());
+        }
+        scheduleTaskCleanup(task.getTaskId());
+        advanceCaptureBatch(task);
+    }
+
+    private void startBatchReturn(CaptureBatchContext context) {
+        DeviceCamCaptureBatchRespVO batch = context.batch();
+        synchronized (context) {
+            if (!"running".equals(batch.getStatus())) {
+                return;
+            }
+            batch.setStatus("returning_target_2");
+            batch.setMessage("all photos received; returning to target 2");
+        }
+
+        PendingBatchReturn pending = new PendingBatchReturn(
+                context.sliderLampChipId(),
+                context.targetTwoMm(),
+                context.storeId()
+        );
+        pendingBatchReturns.put(batch.getBatchId(), pending);
+        webSocketPushService.pushCamStatus(Map.of(
+                "camChipId", batch.getCamChipId(),
+                "workStatus", "returning_target_2",
+                "batchId", batch.getBatchId(),
+                "message", "三张图片已收到，滑轨返回区域 2"
+        ), context.storeId());
+
+        ObjectNode motion = objectMapper.createObjectNode();
+        motion.put("type", "arm_position");
+        motion.put("source", "camera_batch_return");
+        motion.put("taskId", batch.getBatchId());
+        motion.put("slider", context.targetTwoMm());
+        boolean sent;
+        try {
+            sent = deviceSessionManager.sendToDevice(context.sliderLampChipId(), motion.toString());
+        } catch (RuntimeException e) {
+            log.warn("batch return command failed, batchId={}", batch.getBatchId(), e);
+            sent = false;
+        }
+        if (!sent) {
+            pendingBatchReturns.remove(batch.getBatchId(), pending);
+            finishCaptureBatch(context, "return_failed", "failed to return to target 2", "error");
+            return;
+        }
+        scheduleBatchReturnTimeout(batch.getBatchId());
+    }
+
+    private void handleBatchReturnArrival(
+            DeviceSliderStatusReqVO reqVO,
+            String batchId,
+            PendingBatchReturn pending) {
+        if (!sameChipId(reqVO.getChipId(), pending.sliderLampChipId())
+                || Math.abs(reqVO.getTargetMm() - pending.targetMm()) > SLIDER_ARRIVAL_TOLERANCE_MM
+                || !pendingBatchReturns.remove(batchId, pending)) {
+            return;
+        }
+        CaptureBatchContext context = batchContexts.get(batchId);
+        if (context != null) {
+            finishCaptureBatch(context, "completed", "batch capture completed at target 2", "batch_complete");
+        }
+    }
+
+    private void finishCaptureBatch(
+            CaptureBatchContext context,
+            String status,
+            String message,
+            String camWorkStatus) {
+        DeviceCamCaptureBatchRespVO batch = context.batch();
+        synchronized (context) {
+            if ("completed".equals(batch.getStatus()) || "return_failed".equals(batch.getStatus())) {
+                return;
+            }
+            batch.setStatus(status);
+            batch.setMessage(message);
+        }
+        pendingBatchReturns.remove(batch.getBatchId());
+        releaseCaptureSlots(batch.getBatchId(), batch.getCamChipId());
+        webSocketPushService.pushCamStatus(Map.of(
+                "camChipId", batch.getCamChipId(),
+                "workStatus", camWorkStatus,
+                "batchId", batch.getBatchId(),
+                "message", message
+        ), context.storeId());
+        scheduleBatchCleanup(batch.getBatchId());
+    }
+
     @Override
     public DeviceCamCaptureTaskRespVO uploadCapturePhoto(String taskId, MultipartFile file) {
         DeviceCamCaptureTaskRespVO task = taskCache.get(taskId);
@@ -486,41 +782,112 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             throw new ServiceException("拍摄任务不存在或已过期");
         }
         DeviceDO cam = requireCam(task.getCamChipId());
-        task.setStatus("uploading");
-        task.setMessage("uploading capture photo");
-        webSocketPushService.pushCamCaptureResult(task, cam.getStoreId());
-        try {
-            String imageName = saveUpload(file, "capture", taskId);
-            task.setImageName(imageName);
-            task.setPhotoUrl("/admin/device/cam/upload/" + imageName);
-        } catch (RuntimeException e) {
-            task.setStatus("upload_failed");
-            task.setMessage("capture photo upload failed, retry allowed");
-            releaseCaptureSlots(task);
-            scheduleTaskCleanup(taskId);
+        String originalFilename;
+        String contentType;
+        Path storedPath;
+        DeviceCamCaptureTaskRespVO receivedSnapshot;
+        synchronized (task) {
+            if (notBlank(task.getImageName()) && isPhotoAlreadyReceived(task.getStatus())) {
+                return copyCaptureTask(task);
+            }
+            task.setStatus("uploading");
+            task.setMessage("uploading capture photo");
             webSocketPushService.pushCamCaptureResult(task, cam.getStoreId());
-            throw e;
+            originalFilename = file == null ? null : file.getOriginalFilename();
+            contentType = file == null ? null : file.getContentType();
+            try {
+                String imageName = saveUpload(file, "capture", taskId);
+                task.setImageName(imageName);
+                task.setPhotoUrl("/admin/device/cam/upload/" + imageName);
+                storedPath = CAM_UPLOAD_DIR.resolve(imageName).normalize();
+            } catch (RuntimeException e) {
+                task.setStatus("upload_failed");
+                task.setMessage("capture photo upload failed, retry allowed");
+                if (!notBlank(task.getBatchId())) {
+                    releaseCaptureSlots(task);
+                    scheduleTaskCleanup(taskId);
+                }
+                webSocketPushService.pushCamCaptureResult(task, cam.getStoreId());
+                throw e;
+            }
+            task.setStatus("image_received");
+            task.setMessage("capture photo received");
+            receivedSnapshot = copyCaptureTask(task);
         }
-        try {
-            aiService.fabricRecognize(task.getTargetChipId(), file);
-            task.setStatus("ai_done");
-            task.setMessage("capture photo saved and AI finished");
-            captureUploadTokens.remove(taskId);
-        } catch (Exception e) {
-            task.setStatus("photo_saved_ai_failed");
-            task.setMessage("photo saved but AI failed, retry allowed");
-            log.warn("cam capture photo saved but AI failed, taskId={}, target={}", taskId, task.getTargetChipId(), e);
-        }
+
         log.info("pushCamCaptureResult taskId={} status={} imageName={} photoUrl={} storeId={}",
                 taskId, task.getStatus(), task.getImageName(), task.getPhotoUrl(), cam.getStoreId());
         webSocketPushService.pushCamCaptureResult(task, cam.getStoreId());
 
-        // 任务到达终态后安排清理，避免 taskCache 无限增长
-        if (isCaptureTerminalStatus(task.getStatus())) {
+        if (notBlank(task.getBatchId())) {
+            advanceCaptureBatch(task);
+        } else {
             releaseCaptureSlots(task);
-            scheduleTaskCleanup(taskId);
         }
-        return task;
+        enqueueCaptureAi(task, cam.getStoreId(), storedPath, originalFilename, contentType);
+        return receivedSnapshot;
+    }
+
+    private void enqueueCaptureAi(
+            DeviceCamCaptureTaskRespVO task,
+            Long storeId,
+            Path storedPath,
+            String originalFilename,
+            String contentType) {
+        try {
+            captureAiExecutor.execute(() -> processCaptureAi(
+                    task,
+                    storeId,
+                    storedPath,
+                    originalFilename,
+                    contentType
+            ));
+        } catch (RuntimeException e) {
+            log.warn("capture AI queue rejected, taskId={}", task.getTaskId(), e);
+            synchronized (task) {
+                task.setStatus("photo_saved_ai_failed");
+                task.setMessage("photo saved but AI queue failed");
+            }
+            webSocketPushService.pushCamCaptureResult(task, storeId);
+            scheduleTaskCleanup(task.getTaskId());
+        }
+    }
+
+    private void processCaptureAi(
+            DeviceCamCaptureTaskRespVO task,
+            Long storeId,
+            Path storedPath,
+            String originalFilename,
+            String contentType) {
+        synchronized (task) {
+            if (!"image_received".equals(task.getStatus())) {
+                return;
+            }
+            task.setStatus("ai_processing");
+            task.setMessage("AI processing");
+        }
+        webSocketPushService.pushCamCaptureResult(task, storeId);
+        try {
+            aiService.fabricRecognize(
+                    task.getTargetChipId(),
+                    new StoredImageMultipartFile(storedPath, originalFilename, contentType)
+            );
+            synchronized (task) {
+                task.setStatus("ai_done");
+                task.setMessage("capture photo saved and AI finished");
+            }
+        } catch (Exception e) {
+            synchronized (task) {
+                task.setStatus("photo_saved_ai_failed");
+                task.setMessage("photo saved but AI failed");
+            }
+            log.warn("cam capture photo saved but AI failed, taskId={}, target={}",
+                    task.getTaskId(), task.getTargetChipId(), e);
+        }
+        log.info("pushCamCaptureResult taskId={} status={} imageName={} photoUrl={} storeId={}",
+                task.getTaskId(), task.getStatus(), task.getImageName(), task.getPhotoUrl(), storeId);
+        webSocketPushService.pushCamCaptureResult(task, storeId);
+        scheduleTaskCleanup(task.getTaskId());
     }
 
     @Override
@@ -594,15 +961,28 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         captureTimeoutExecutor.schedule(() -> timeoutCaptureTask(taskId), CAPTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
+    private void scheduleBatchReturnTimeout(String batchId) {
+        captureTimeoutExecutor.schedule(() -> timeoutBatchReturn(batchId), MOTION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
     private void scheduleTaskCleanup(String taskId) {
         // 任务终态后延迟 5 分钟清理，给前端足够时间查询状态
         captureTimeoutExecutor.schedule(() -> {
             DeviceCamCaptureTaskRespVO task = taskCache.remove(taskId);
             captureUploadTokens.remove(taskId);
             pendingCaptureMotions.remove(taskId);
+            captureBatchByTask.remove(taskId);
             if (task != null) {
                 releaseCaptureSlots(task);
             }
+        }, 5, TimeUnit.MINUTES);
+    }
+
+    private void scheduleBatchCleanup(String batchId) {
+        captureTimeoutExecutor.schedule(() -> {
+            batchCache.remove(batchId);
+            batchContexts.remove(batchId);
+            pendingBatchReturns.remove(batchId);
         }, 5, TimeUnit.MINUTES);
     }
 
@@ -617,10 +997,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
     private void timeoutCaptureTask(String taskId) {
         DeviceCamCaptureTaskRespVO task = taskCache.get(taskId);
-        if (task == null || isCaptureTerminalStatus(task.getStatus())) {
+        if (task == null || !Set.of("capturing", "uploading", "upload_failed").contains(task.getStatus())) {
             return;
         }
-        if ("upload_failed".equals(task.getStatus())) {
+        if ("upload_failed".equals(task.getStatus()) && !notBlank(task.getBatchId())) {
+            return;
+        }
+        if (notBlank(task.getBatchId())) {
+            failBatchPhysicalTask(task, "timeout", "capture photo upload timeout");
             return;
         }
         task.setStatus("timeout");
@@ -642,13 +1026,13 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
     }
 
-    private boolean isCaptureTerminalStatus(String status) {
-        return "ai_done".equals(status)
-                || "photo_saved_ai_failed".equals(status)
-                || "motion_timeout".equals(status)
-                || "camera_offline".equals(status)
-                || "camera_command_failed".equals(status)
-                || "timeout".equals(status);
+    private void timeoutBatchReturn(String batchId) {
+        PendingBatchReturn pending = pendingBatchReturns.remove(batchId);
+        CaptureBatchContext context = batchContexts.get(batchId);
+        if (pending == null || context == null || !"returning_target_2".equals(context.batch().getStatus())) {
+            return;
+        }
+        finishCaptureBatch(context, "return_failed", "return to target 2 timeout", "error");
     }
 
     private void claimCaptureSlot(Map<String, String> slots, String chipId, String taskId, String message) {
@@ -657,13 +1041,25 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             if (existingTaskId == null || existingTaskId.equals(taskId)) {
                 return;
             }
-            DeviceCamCaptureTaskRespVO existing = taskCache.get(existingTaskId);
-            if (existing == null || isCaptureTerminalStatus(existing.getStatus())) {
+            if (!isCaptureOperationActive(existingTaskId)) {
                 slots.remove(chipId, existingTaskId);
                 continue;
             }
             throw new ServiceException(message);
         }
+    }
+
+    private boolean isCaptureOperationActive(String operationId) {
+        DeviceCamCaptureBatchRespVO batch = batchCache.get(operationId);
+        if (batch != null) {
+            return "running".equals(batch.getStatus()) || "returning_target_2".equals(batch.getStatus());
+        }
+        DeviceCamCaptureTaskRespVO task = taskCache.get(operationId);
+        if (task == null) {
+            return false;
+        }
+        return Set.of("waiting_motion", "capturing", "uploading", "upload_failed")
+                .contains(task.getStatus());
     }
 
     private void discardCaptureTask(DeviceCamCaptureTaskRespVO task) {
@@ -673,15 +1069,64 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         releaseCaptureSlots(task);
     }
 
-    private void releaseCaptureSlots(DeviceCamCaptureTaskRespVO task) {
-        String sliderLampChipId = captureSliderLampByTask.remove(task.getTaskId());
-        if (notBlank(sliderLampChipId)) {
-            activeCaptureTaskBySliderLamp.remove(sliderLampChipId, task.getTaskId());
+    private void discardCaptureBatch(String batchId) {
+        DeviceCamCaptureBatchRespVO batch = batchCache.remove(batchId);
+        CaptureBatchContext context = batchContexts.remove(batchId);
+        pendingBatchReturns.remove(batchId);
+        if (batch != null) {
+            for (DeviceCamCaptureTaskRespVO task : batch.getTasks()) {
+                taskCache.remove(task.getTaskId());
+                captureUploadTokens.remove(task.getTaskId());
+                pendingCaptureMotions.remove(task.getTaskId());
+                captureBatchByTask.remove(task.getTaskId());
+            }
         }
-        activeCaptureTaskByCam.remove(task.getCamChipId(), task.getTaskId());
+        String camChipId = batch != null
+                ? batch.getCamChipId()
+                : (context == null ? null : context.batch().getCamChipId());
+        if (notBlank(camChipId)) {
+            releaseCaptureSlots(batchId, camChipId);
+        }
+    }
+
+    private boolean isPhotoAlreadyReceived(String status) {
+        return Set.of("image_received", "ai_processing", "ai_done", "photo_saved_ai_failed")
+                .contains(defaultStatus(status, ""));
+    }
+
+    private DeviceCamCaptureTaskRespVO copyCaptureTask(DeviceCamCaptureTaskRespVO source) {
+        DeviceCamCaptureTaskRespVO copy = new DeviceCamCaptureTaskRespVO();
+        copy.setTaskId(source.getTaskId());
+        copy.setBatchId(source.getBatchId());
+        copy.setSequence(source.getSequence());
+        copy.setCamChipId(source.getCamChipId());
+        copy.setTargetChipId(source.getTargetChipId());
+        copy.setTargetIndex(source.getTargetIndex());
+        copy.setStatus(source.getStatus());
+        copy.setMessage(source.getMessage());
+        copy.setImageName(source.getImageName());
+        copy.setPhotoUrl(source.getPhotoUrl());
+        copy.setCreateTime(source.getCreateTime());
+        return copy;
+    }
+
+    private void releaseCaptureSlots(DeviceCamCaptureTaskRespVO task) {
+        releaseCaptureSlots(task.getTaskId(), task.getCamChipId());
+    }
+
+    private void releaseCaptureSlots(String operationId, String camChipId) {
+        String sliderLampChipId = captureSliderLampByTask.remove(operationId);
+        if (notBlank(sliderLampChipId)) {
+            activeCaptureTaskBySliderLamp.remove(sliderLampChipId, operationId);
+        }
+        activeCaptureTaskByCam.remove(camChipId, operationId);
     }
 
     private void failCaptureTask(DeviceCamCaptureTaskRespVO task, String status, String message, Long storeId) {
+        if (notBlank(task.getBatchId())) {
+            failBatchPhysicalTask(task, status, message);
+            return;
+        }
         task.setStatus(status);
         task.setMessage(message);
         captureUploadTokens.remove(task.getTaskId());
@@ -693,6 +1138,12 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
     @PreDestroy
     public void shutdownCaptureTimeoutExecutor() {
+        captureAiExecutor.shutdownNow();
+        try {
+            captureAiExecutor.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         captureTimeoutExecutor.shutdownNow();
     }
 
@@ -1154,6 +1605,132 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             String uploadToken,
             Long storeId
     ) {
+    }
+
+    private record BatchCaptureTarget(
+            int targetIndex,
+            String targetChipId,
+            double sliderTargetMm
+    ) {
+    }
+
+    private record PendingBatchReturn(
+            String sliderLampChipId,
+            double targetMm,
+            Long storeId
+    ) {
+    }
+
+    private static final class CaptureBatchContext {
+        private final DeviceCamCaptureBatchRespVO batch;
+        private final List<BatchCaptureTarget> targets;
+        private final String sliderLampChipId;
+        private final Long storeId;
+        private final double targetTwoMm;
+        private int currentIndex = -1;
+
+        private CaptureBatchContext(
+                DeviceCamCaptureBatchRespVO batch,
+                List<BatchCaptureTarget> targets,
+                String sliderLampChipId,
+                Long storeId,
+                double targetTwoMm) {
+            this.batch = batch;
+            this.targets = targets;
+            this.sliderLampChipId = sliderLampChipId;
+            this.storeId = storeId;
+            this.targetTwoMm = targetTwoMm;
+        }
+
+        private DeviceCamCaptureBatchRespVO batch() {
+            return batch;
+        }
+
+        private List<BatchCaptureTarget> targets() {
+            return targets;
+        }
+
+        private String sliderLampChipId() {
+            return sliderLampChipId;
+        }
+
+        private Long storeId() {
+            return storeId;
+        }
+
+        private double targetTwoMm() {
+            return targetTwoMm;
+        }
+
+        private int currentIndex() {
+            return currentIndex;
+        }
+
+        private void setCurrentIndex(int currentIndex) {
+            this.currentIndex = currentIndex;
+        }
+    }
+
+    private static final class StoredImageMultipartFile implements MultipartFile {
+        private final Path path;
+        private final String originalFilename;
+        private final String contentType;
+
+        private StoredImageMultipartFile(Path path, String originalFilename, String contentType) {
+            this.path = path;
+            this.originalFilename = originalFilename == null || originalFilename.isBlank()
+                    ? path.getFileName().toString()
+                    : originalFilename;
+            this.contentType = contentType;
+        }
+
+        @Override
+        public String getName() {
+            return "file";
+        }
+
+        @Override
+        public String getOriginalFilename() {
+            return originalFilename;
+        }
+
+        @Override
+        public String getContentType() {
+            return contentType;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            try {
+                return !Files.isRegularFile(path) || Files.size(path) == 0L;
+            } catch (IOException ignored) {
+                return true;
+            }
+        }
+
+        @Override
+        public long getSize() {
+            try {
+                return Files.size(path);
+            } catch (IOException e) {
+                return 0L;
+            }
+        }
+
+        @Override
+        public byte[] getBytes() throws IOException {
+            return Files.readAllBytes(path);
+        }
+
+        @Override
+        public InputStream getInputStream() throws IOException {
+            return Files.newInputStream(path);
+        }
+
+        @Override
+        public void transferTo(File dest) throws IOException, IllegalStateException {
+            Files.copy(path, dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     private record PresenceDurationState(LocalDateTime updateTime) {

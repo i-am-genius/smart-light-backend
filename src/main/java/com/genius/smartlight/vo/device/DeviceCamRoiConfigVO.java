@@ -22,6 +22,9 @@ public class DeviceCamRoiConfigVO {
     @Schema(description = "每个 ROI 的唯一滑轨位置，单位 mm")
     private Map<String, Double> sliderPresets = new LinkedHashMap<>();
 
+    @Schema(description = "每个 ROI 从 0 mm 移动到预设位置的 slow/normal/fast 实测时间，单位秒")
+    private Map<String, DeviceCamSliderMoveTimeVO> sliderMoveTimes = new LinkedHashMap<>();
+
     @JsonIgnore
     private Map<String, DeviceCamPresetVO> legacyCapturePresets = new LinkedHashMap<>();
 

@@ -9,6 +9,7 @@ import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.DurationRecordMapper;
 import com.genius.smartlight.service.ai.AiService;
+import com.genius.smartlight.service.device.SliderMotionStateService;
 import com.genius.smartlight.service.personflow.PersonFlowRecordService;
 import com.genius.smartlight.service.store.CurrentStoreService;
 import com.genius.smartlight.vo.device.DeviceCamCaptureBatchReqVO;
@@ -17,6 +18,7 @@ import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiItemVO;
+import com.genius.smartlight.vo.device.DeviceCamSliderMoveTimeVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
 import com.genius.smartlight.vo.device.DeviceSliderStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
@@ -44,12 +46,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -64,6 +68,7 @@ class DeviceCamServiceImplTest {
     private WebSocketPushService webSocketPushService;
     private DeviceSessionManager deviceSessionManager;
     private AiService aiService;
+    private SliderMotionStateService sliderMotionStateService;
     private final List<Path> testUploadPaths = new ArrayList<>();
     private DeviceCamServiceImpl service;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -79,6 +84,7 @@ class DeviceCamServiceImplTest {
         webSocketPushService = mock(WebSocketPushService.class);
         deviceSessionManager = mock(DeviceSessionManager.class);
         aiService = mock(AiService.class);
+        sliderMotionStateService = mock(SliderMotionStateService.class);
 
         service = new DeviceCamServiceImpl(
                 deviceMapper,
@@ -88,6 +94,7 @@ class DeviceCamServiceImplTest {
                 mock(PersonFlowRecordService.class),
                 mock(DurationRecordMapper.class),
                 aiService,
+                sliderMotionStateService,
                 objectMapper
         );
 
@@ -102,6 +109,10 @@ class DeviceCamServiceImplTest {
         when(deviceSessionManager.sendToDevice(eq("CAM-001"), any(String.class))).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq("LAMP-001"), any(String.class))).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class))).thenReturn(true);
+        when(sliderMotionStateService.getSnapshot(any(String.class), any()))
+                .thenReturn(new SliderMotionStateService.SliderStateSnapshot(
+                        0D, 0D, "normal", null, null
+                ));
         writeDefaultCaptureConfig();
     }
 
@@ -320,7 +331,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void sliderArrival_sendsBackwardCompatibleCameraCaptureExactlyOnce() throws Exception {
+    void estimatedMoveTime_sendsBackwardCompatibleCameraCaptureExactlyOnce() throws Exception {
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId("CAM-001");
         request.setTargetChipId("LAMP-001");
@@ -332,7 +343,8 @@ class DeviceCamServiceImplTest {
         service.reportSliderStatus(arrival);
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager, times(1)).sendToDevice(eq("CAM-001"), payloadCaptor.capture());
+        verify(deviceSessionManager, timeout(1500).times(1))
+                .sendToDevice(eq("CAM-001"), payloadCaptor.capture());
         JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
         assertThat(payload.path("type").asText()).isEqualTo("cameraCapture");
         assertThat(payload.path("taskId").asText()).isEqualTo(task.getTaskId());
@@ -342,7 +354,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void sliderArrival_withWrongTargetDoesNotTriggerCamera() {
+    void sliderArrival_withWrongTargetDoesNotTriggerCameraBeforeTimer() {
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId("CAM-001");
         request.setTargetChipId("LAMP-001");
@@ -356,7 +368,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void sliderArrival_fromDifferentLampDoesNotTriggerCamera() {
+    void sliderArrival_fromDifferentLampDoesNotTriggerCameraBeforeTimer() {
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId("CAM-001");
         request.setTargetChipId("LAMP-001");
@@ -441,7 +453,7 @@ class DeviceCamServiceImplTest {
         request.setCamChipId("CAM-001");
         DeviceCamCaptureBatchRespVO batch = service.createCaptureBatch(request);
         DeviceCamCaptureTaskRespVO first = batch.getTasks().get(0);
-        service.reportSliderStatus(sliderArrival(first, SLIDER_LAMP_CHIP_ID, 120.0));
+        awaitCameraCapture(first.getTaskId());
 
         DeviceCamCaptureTaskRespVO response = service.uploadCapturePhoto(
                 first.getTaskId(),
@@ -470,10 +482,9 @@ class DeviceCamServiceImplTest {
         request.setCamChipId("CAM-001");
         DeviceCamCaptureBatchRespVO batch = service.createCaptureBatch(request);
 
-        double[] orderedPositions = {120.0, 320.0, 640.0};
         for (int index = 0; index < batch.getTasks().size(); index++) {
             DeviceCamCaptureTaskRespVO task = batch.getTasks().get(index);
-            service.reportSliderStatus(sliderArrival(task, SLIDER_LAMP_CHIP_ID, orderedPositions[index]));
+            awaitCameraCapture(task.getTaskId());
             DeviceCamCaptureTaskRespVO upload = service.uploadCapturePhoto(
                     task.getTaskId(),
                     new MockMultipartFile("file", "zone-" + task.getTargetIndex() + ".jpg",
@@ -496,14 +507,7 @@ class DeviceCamServiceImplTest {
         verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-002"), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-003"), any());
 
-        DeviceSliderStatusReqVO returnArrival = new DeviceSliderStatusReqVO();
-        returnArrival.setChipId(SLIDER_LAMP_CHIP_ID);
-        returnArrival.setTaskId(batch.getBatchId());
-        returnArrival.setStatus("arrived");
-        returnArrival.setTargetMm(640.0);
-        service.reportSliderStatus(returnArrival);
-
-        assertThat(batch.getStatus()).isEqualTo("completed");
+        awaitBatchStatus(batch, "completed");
     }
 
     @Test
@@ -617,6 +621,7 @@ class DeviceCamServiceImplTest {
         config.setConfigured(true);
         config.setRois(List.of(roi));
         config.setSliderPresets(Map.of("1", 600.0));
+        config.setSliderMoveTimes(moveTimes(1));
 
         Path path = manualConfigPath();
         Files.createDirectories(path.getParent());
@@ -633,6 +638,7 @@ class DeviceCamServiceImplTest {
         config.setSliderLampChipId(MANUAL_LAMP_CHIP_ID);
         config.setRois(List.of(target));
         config.setSliderPresets(Map.of(String.valueOf(targetIndex), 600.0));
+        config.setSliderMoveTimes(moveTimes(targetIndex));
 
         Path path = manualConfigPath();
         Files.createDirectories(path.getParent());
@@ -673,6 +679,7 @@ class DeviceCamServiceImplTest {
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setRois(List.of(target));
         config.setSliderPresets(Map.of("1", 320.0));
+        config.setSliderMoveTimes(moveTimes(1));
 
         try {
             Files.createDirectories(defaultConfigPath().getParent());
@@ -699,6 +706,11 @@ class DeviceCamServiceImplTest {
         config.setConfigured(true);
         config.setRois(List.of(target1, target2, target3));
         config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));
+        Map<String, DeviceCamSliderMoveTimeVO> batchMoveTimes = new LinkedHashMap<>();
+        batchMoveTimes.putAll(moveTimes(1));
+        batchMoveTimes.putAll(moveTimes(2));
+        batchMoveTimes.putAll(moveTimes(3));
+        config.setSliderMoveTimes(batchMoveTimes);
         objectMapper.writeValue(defaultConfigPath().toFile(), config);
 
         stubDevices(
@@ -712,6 +724,30 @@ class DeviceCamServiceImplTest {
 
     private Path defaultConfigPath() {
         return Path.of("data", "cam-config", "CAM-001.json").toAbsolutePath().normalize();
+    }
+
+    private Map<String, DeviceCamSliderMoveTimeVO> moveTimes(int targetIndex) {
+        DeviceCamSliderMoveTimeVO value = new DeviceCamSliderMoveTimeVO();
+        value.setSlow(0.001D);
+        value.setNormal(0.001D);
+        value.setFast(0.001D);
+        return Map.of(String.valueOf(targetIndex), value);
+    }
+
+    private void awaitCameraCapture(String taskId) {
+        verify(deviceSessionManager, timeout(1500).times(1)).sendToDevice(
+                eq("CAM-001"),
+                argThat(payload -> payload.contains("\"type\":\"cameraCapture\"")
+                        && payload.contains("\"taskId\":\"" + taskId + "\""))
+        );
+    }
+
+    private void awaitBatchStatus(DeviceCamCaptureBatchRespVO batch, String expectedStatus) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!expectedStatus.equals(batch.getStatus()) && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+        assertThat(batch.getStatus()).isEqualTo(expectedStatus);
     }
 
     private void rememberTestUpload(DeviceCamCaptureTaskRespVO task) {

@@ -11,6 +11,7 @@ import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.StoreMapper;
 import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.device.DeviceControlService;
+import com.genius.smartlight.service.device.SliderMotionStateService;
 import com.genius.smartlight.vo.device.DeviceAnnounceReqVO;
 import com.genius.smartlight.vo.device.DeviceAnnounceRespVO;
 import com.genius.smartlight.vo.device.DeviceArmControlReqVO;
@@ -63,6 +64,8 @@ public class DeviceGatewayController {
     private static final float ARM_TILT_MAX = 90f;
     private static final float CAM_PITCH_MIN = -90f;
     private static final float CAM_PITCH_MAX = 90f;
+    private static final float SLIDER_MIN_MM = 0f;
+    private static final float SLIDER_MAX_MM = 2500f;
 
     private final DeviceMapper deviceMapper;
     private final StoreMapper storeMapper;
@@ -70,6 +73,7 @@ public class DeviceGatewayController {
     private final DeviceAnnounceNotifier deviceAnnounceNotifier;
     private final ObjectMapper objectMapper;
     private final DeviceControlService deviceControlService;
+    private final SliderMotionStateService sliderMotionStateService;
 
     @Operation(summary = "设备上线通告", description = "设备启动或重连后调用。请求体包含 chipId、deviceType、ip；返回 added 表示设备是否已添加并绑定店铺，同时推送上线通告给浏览器端。")
     @PostMapping("/announce")
@@ -244,6 +248,7 @@ public class DeviceGatewayController {
         }
 
         sendToDevice(chipId, payload);
+        rememberSliderControl(device, messageType, reqVO);
         return CommonResult.success(true);
     }
 
@@ -346,6 +351,7 @@ public class DeviceGatewayController {
     private void validateArmPosition(DeviceArmControlReqVO reqVO) {
         validateRange("pan", reqVO.getPan(), ARM_PAN_MIN, ARM_PAN_MAX);
         validateRange("tilt", reqVO.getTilt(), ARM_TILT_MIN, ARM_TILT_MAX);
+        validateSliderRange(reqVO.getSlider());
     }
 
     private void validateCamPtzAbsolute(DeviceCamPtzReqVO reqVO) {
@@ -371,9 +377,49 @@ public class DeviceGatewayController {
         if (position == null) {
             throw new ServiceException("滑轨位置不能为空");
         }
-        if (position < 0 || position > 500) {
-            throw new ServiceException("滑轨位置范围必须是 0 到 500 mm");
+        if (position < SLIDER_MIN_MM || position > SLIDER_MAX_MM) {
+            throw new ServiceException("滑轨位置范围必须是 0 到 2500 mm");
         }
+    }
+
+    private void validateSliderRange(Float value) {
+        if (value == null) {
+            return;
+        }
+        if (!Float.isFinite(value) || value < SLIDER_MIN_MM || value > SLIDER_MAX_MM) {
+            throw new ServiceException("slider range must be 0.0 to 2500.0 mm");
+        }
+    }
+
+    private void rememberSliderControl(DeviceDO device, String messageType, DeviceArmControlReqVO reqVO) {
+        if ("arm_speed".equals(messageType)) {
+            sliderMotionStateService.updateSpeedMode(
+                    device.getChipId(),
+                    device.getStoreId(),
+                    normalizeArmSpeed(reqVO.getSpeed())
+            );
+            return;
+        }
+        if ("arm_position".equals(messageType) && reqVO.getSlider() != null) {
+            sliderMotionStateService.recordCommandedPosition(
+                    device.getChipId(),
+                    device.getStoreId(),
+                    reqVO.getSlider()
+            );
+            return;
+        }
+        if ("slider_position".equals(resolveOptionalArmAction(reqVO)) && reqVO.getPosition() != null) {
+            sliderMotionStateService.recordCommandedPosition(
+                    device.getChipId(),
+                    device.getStoreId(),
+                    reqVO.getPosition()
+            );
+        }
+    }
+
+    private String resolveOptionalArmAction(DeviceArmControlReqVO reqVO) {
+        String action = normalizeText(reqVO.getAction());
+        return action == null ? normalizeText(reqVO.getDirection()) : action;
     }
 
     private String normalizeText(String value) {

@@ -20,6 +20,10 @@ import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiItemVO;
 import com.genius.smartlight.vo.device.DeviceCamSliderMoveTimeVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
+import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
+import com.genius.smartlight.vo.device.DeviceLampClothStateRespVO;
+import com.genius.smartlight.vo.device.DeviceLampProximityStateReqVO;
+import com.genius.smartlight.vo.device.DeviceLampProximityStateRespVO;
 import com.genius.smartlight.vo.device.DeviceSliderStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
@@ -35,6 +39,7 @@ import org.springframework.mock.web.MockMultipartFile;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -138,7 +143,15 @@ class DeviceCamServiceImplTest {
 
         DeviceTrackingStatusRespVO result = service.startTrackingManually(manualTrackingRequest(1));
 
-        assertThat(result.getTrackingStatus()).isEqualTo("tracking");
+        assertThat(result.getTrackingStatus()).isEqualTo("waiting_motion");
+        verify(deviceSessionManager, never()).sendToDevice(eq(MANUAL_CAM_CHIP_ID), any(String.class));
+        verify(deviceSessionManager, never()).sendToDevice(
+                eq(MANUAL_LAMP_CHIP_ID),
+                argThat(payload -> payload.contains("\"type\":\"lampTrackingStart\""))
+        );
+
+        service.triggerPendingTracking(MANUAL_CAM_CHIP_ID);
+
         InOrder commandOrder = inOrder(deviceSessionManager);
         commandOrder.verify(deviceSessionManager)
                 .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), org.mockito.ArgumentMatchers.argThat(
@@ -167,6 +180,7 @@ class DeviceCamServiceImplTest {
         configureManualTrackingDevices(true, true, "192.168.1.88");
         writeManualTrackingConfig();
         service.startTrackingManually(manualTrackingRequest(1));
+        service.triggerPendingTracking(MANUAL_CAM_CHIP_ID);
 
         DeviceTrackingStatusReqVO status = new DeviceTrackingStatusReqVO();
         status.setChipId(MANUAL_CAM_CHIP_ID);
@@ -177,6 +191,9 @@ class DeviceCamServiceImplTest {
         status.setTargetIndex(1);
         service.reportTrackingStatus(status);
 
+        assertThat(service.getTrackingStatus(MANUAL_CAM_CHIP_ID)).isEqualTo("lost");
+        assertThat(service.getTrackingStatus(MANUAL_LAMP_CHIP_ID)).isEqualTo("lost");
+
         ArgumentCaptor<String> lampPayloads = ArgumentCaptor.forClass(String.class);
         verify(deviceSessionManager, times(3))
                 .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), lampPayloads.capture());
@@ -184,8 +201,9 @@ class DeviceCamServiceImplTest {
                 .isEqualTo("arm_position");
         assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(1)).path("type").asText())
                 .isEqualTo("lampTrackingStart");
-        assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(2)).path("type").asText())
-                .isEqualTo("lampTrackingStop");
+        JsonNode stop = objectMapper.readTree(lampPayloads.getAllValues().get(2));
+        assertThat(stop.path("type").asText()).isEqualTo("lampTrackingStop");
+        assertThat(stop.path("clearClothTaken").asBoolean()).isTrue();
     }
 
     @Test
@@ -197,6 +215,38 @@ class DeviceCamServiceImplTest {
         assertThat(result.getTrackingStatus()).isEqualTo("stopped");
         assertSentCommand(MANUAL_CAM_CHIP_ID, "cameraReturnCenter");
         assertSentCommand(MANUAL_LAMP_CHIP_ID, "lampTrackingStop");
+    }
+
+    @Test
+    void proximityStateBroadcastsBooleanWithoutDistance() {
+        DeviceLampProximityStateReqVO request = new DeviceLampProximityStateReqVO();
+        request.setChipId("LAMP-001");
+        request.setNearby(true);
+
+        DeviceLampProximityStateRespVO result = service.reportLampProximityState(request);
+
+        assertThat(result.getNearby()).isTrue();
+        verify(webSocketPushService).pushLampProximityState(result, 1L);
+    }
+
+    @Test
+    void takenUsesServerTimeAndClearingStatePreservesLastTakenTime() {
+        LocalDateTime before = LocalDateTime.now();
+        DeviceLampClothStateReqVO taken = new DeviceLampClothStateReqVO();
+        taken.setChipId("LAMP-001");
+        taken.setClothState("taken");
+        taken.setLastTakenAt("2000-01-01T00:00:00");
+
+        DeviceLampClothStateRespVO takenResult = service.reportLampClothState(taken);
+
+        assertThat(takenResult.getLastTakenAt()).isAfterOrEqualTo(before);
+
+        DeviceLampClothStateReqVO cleared = new DeviceLampClothStateReqVO();
+        cleared.setChipId("LAMP-001");
+        cleared.setClothState("on_rack");
+        DeviceLampClothStateRespVO clearedResult = service.reportLampClothState(cleared);
+
+        assertThat(clearedResult.getLastTakenAt()).isEqualTo(takenResult.getLastTakenAt());
     }
 
     @Test
@@ -436,6 +486,41 @@ class DeviceCamServiceImplTest {
         assertThat(payload.path("source").asText()).isEqualTo("camera_capture");
         assertThat(payload.path("taskId").asText()).isEqualTo(batch.getTasks().get(0).getTaskId());
         assertThat(payload.path("slider").asDouble()).isEqualTo(120.0);
+    }
+
+    @Test
+    void automaticGarmentDetectionCreatesOneBatchAndStaysDetectingUntilAiFinishes() throws Exception {
+        writeBatchCaptureConfig();
+        when(deviceMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(
+                device("CAM-001", "cam"),
+                device("LAMP-001", "lamp"),
+                device("LAMP-002", "lamp"),
+                device("LAMP-003", "lamp"),
+                device(SLIDER_LAMP_CHIP_ID, "lamp")
+        ));
+
+        service.startAutomaticGarmentDetection(1L);
+        service.startAutomaticGarmentDetection(1L);
+
+        assertThat(service.getGarmentDetectionStatus(1L)).isEqualTo("detecting");
+        verify(deviceSessionManager, times(1)).sendToDevice(
+                eq(SLIDER_LAMP_CHIP_ID),
+                argThat(payload -> payload.contains("\"type\":\"arm_position\""))
+        );
+        verify(webSocketPushService).pushGarmentDetectionStatus(
+                argThat(payload -> payload.toString().contains("status=detecting")),
+                eq(1L)
+        );
+
+        service.resetAutomaticGarmentDetection(1L);
+        assertThat(service.getGarmentDetectionStatus(1L)).isEqualTo("not_detected");
+
+        service.startAutomaticGarmentDetection(1L);
+        assertThat(service.getGarmentDetectionStatus(1L)).isEqualTo("detecting");
+        verify(deviceSessionManager, times(2)).sendToDevice(
+                eq(SLIDER_LAMP_CHIP_ID),
+                argThat(payload -> payload.contains("\"type\":\"arm_position\""))
+        );
     }
 
     @Test

@@ -13,6 +13,7 @@ import com.genius.smartlight.service.device.DeviceLastSeenService;
 import com.genius.smartlight.service.device.DeviceOnlinePushService;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
+import com.genius.smartlight.vo.device.DeviceLampProximityStateReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
@@ -118,6 +119,16 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                     reqVO.setTracking(node.path("tracking").asBoolean());
                 }
                 deviceCamService.reportLampClothState(reqVO);
+                return;
+            }
+
+            if ("lampProximityState".equals(type)) {
+                chipId = requireChipId(chipId, session, "lampProximityState");
+                if (chipId == null) return;
+                DeviceLampProximityStateReqVO reqVO = new DeviceLampProximityStateReqVO();
+                reqVO.setChipId(chipId);
+                reqVO.setNearby(node.path("nearby").asBoolean(false));
+                deviceCamService.reportLampProximityState(reqVO);
                 return;
             }
 

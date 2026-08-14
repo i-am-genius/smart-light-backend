@@ -23,4 +23,8 @@ public class DeviceOnlineStatusRespVO {
 
     @Schema(description = "Persisted last seen time", example = "2026-06-03T10:30:00")
     private LocalDateTime lastSeenAt;
+    private String garmentDetectionStatus;
+    private Boolean nearby;
+    private LocalDateTime lastTakenAt;
+    private String trackingStatus;
 }

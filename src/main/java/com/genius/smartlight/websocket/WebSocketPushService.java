@@ -204,6 +204,14 @@ public class WebSocketPushService {
         broadcastToStore(storeId, "lampClothState", data);
     }
 
+    public void pushLampProximityState(Object data, Long storeId) {
+        broadcastToStore(storeId, "lampProximityState", data);
+    }
+
+    public void pushGarmentDetectionStatus(Object data, Long storeId) {
+        broadcastToStore(storeId, "garmentDetectionStatus", data);
+    }
+
     public void pushTrackingStatus(Object data, Long storeId) {
         broadcastToStore(storeId, "trackingStatus", data);
     }

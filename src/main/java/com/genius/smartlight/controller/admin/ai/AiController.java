@@ -5,6 +5,7 @@ import com.genius.smartlight.common.FileDownloadUtil;
 import com.genius.smartlight.common.MediaTypeUtil;
 import com.genius.smartlight.service.ai.AiService;
 import com.genius.smartlight.service.ai.FabricArchiveService;
+import com.genius.smartlight.service.device.GarmentSourceResultService;
 import com.genius.smartlight.vo.ai.FabricArchiveDeleteRespVO;
 import com.genius.smartlight.vo.ai.FabricArchivePageRespVO;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
@@ -36,6 +37,7 @@ public class AiController {
 
     private final AiService aiService;
     private final FabricArchiveService fabricArchiveService;
+    private final GarmentSourceResultService garmentSourceResultService;
 
     @Operation(summary = "服装识别留档相册", description = "分页查询当前店铺服装识别留档图片，type 支持 original、annotated、combined")
     @GetMapping("/fabric-archive")
@@ -78,7 +80,11 @@ public class AiController {
             @RequestPart("file") MultipartFile file,
             @Parameter(description = "芯片唯一ID，可选")
             @RequestParam(required = false) String chipId) {
-        return CommonResult.success(aiService.fabricRecognize(chipId, file));
+        FabricRecognizeRespVO result = aiService.fabricRecognize(chipId, file);
+        if (chipId != null && !chipId.isBlank()) {
+            garmentSourceResultService.saveLatestResult(chipId, GarmentSourceResultService.PHONE);
+        }
+        return CommonResult.success(result);
     }
 
     private MediaType resolveImageMediaType(String filename) {

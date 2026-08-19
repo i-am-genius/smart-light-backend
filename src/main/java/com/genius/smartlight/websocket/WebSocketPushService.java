@@ -130,14 +130,11 @@ public class WebSocketPushService {
         payload.put("garmentH", target.h());
         payload.put("garmentImageWidth", target.imageWidth());
         payload.put("garmentImageHeight", target.imageHeight());
-        if (!garmentAimEnabled) {
+        if (!garmentAimEnabled || !StringUtils.hasText(sourceKey)) {
             return;
         }
 
-        Optional<GarmentAimCalibrationFitter.Pose> calibratedPose = StringUtils.hasText(sourceKey)
-                ? garmentAimCalibrationService.predict(chipId, sourceKey, target)
-                : garmentAimCalibrationService.predict(chipId, target);
-        calibratedPose.ifPresent(pose -> {
+        garmentAimCalibrationService.predict(chipId, sourceKey, target).ifPresent(pose -> {
             payload.put("garmentCalibrationValid", true);
             payload.put("garmentAimPan", pose.pan());
             payload.put("garmentAimTilt", pose.tilt());

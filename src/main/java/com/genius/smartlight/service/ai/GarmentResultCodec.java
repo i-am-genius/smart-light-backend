@@ -51,21 +51,30 @@ public final class GarmentResultCodec {
     }
 
     public static Optional<GarmentResultSnapshot> decode(String json) {
+        return decode(json, null);
+    }
+
+    private static Optional<GarmentResultSnapshot> decode(String json, Long deviceId) {
         if (!StringUtils.hasText(json)) {
             return Optional.empty();
         }
         try {
             return Optional.of(MAPPER.readValue(json, GarmentResultSnapshot.class));
         } catch (Exception exception) {
-            log.warn("服装识别结果反序列化失败: exceptionType={}",
-                    exception.getClass().getSimpleName());
+            if (deviceId != null) {
+                log.warn("服装识别结果反序列化失败: deviceId={}, exceptionType={}",
+                        deviceId, exception.getClass().getSimpleName());
+            } else {
+                log.warn("服装识别结果反序列化失败: exceptionType={}",
+                        exception.getClass().getSimpleName());
+            }
             return Optional.empty();
         }
     }
 
     public static void applyToResponse(DeviceDO device, DeviceRespVO response) {
         String json = device.getGarmentResultJson();
-        Optional<GarmentResultSnapshot> snapshot = decode(json);
+        Optional<GarmentResultSnapshot> snapshot = decode(json, device.getId());
         if (snapshot.isPresent()) {
             applySnapshot(snapshot.get(), response);
             return;

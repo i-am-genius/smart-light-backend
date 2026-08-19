@@ -35,10 +35,10 @@
             <artifactId>spring-boot-starter-websocket</artifactId>
         </dependency>
 
-        <!-- AOP for camera capture/source result aspects -->
+        <!-- AspectJ-backed Spring AOP for camera capture/source result aspects -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-aop</artifactId>
+            <artifactId>spring-boot-starter-aspectj</artifactId>
         </dependency>
 
         <!-- Validation -->

@@ -15,8 +15,10 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -77,8 +79,7 @@ class WebSocketPushServiceGarmentTest {
         state.setImageWidth(640);
         state.setImageHeight(480);
         state.setGarments(List.of(part));
-        when(calibration.predict(eq("lamp-1"), org.mockito.ArgumentMatchers.any()))
-                .thenReturn(Optional.of(new GarmentAimCalibrationFitter.Pose(12D, -6D)));
+
         service.pushStateToDevice("lamp-1", state);
 
         ArgumentCaptor<String> deviceJson = ArgumentCaptor.forClass(String.class);
@@ -95,9 +96,24 @@ class WebSocketPushServiceGarmentTest {
         assertThat(devicePayload.path("garmentCenterY").asDouble()).isEqualTo(0.5D);
         assertThat(devicePayload.path("garmentImageWidth").asInt()).isEqualTo(640);
         assertThat(devicePayload.path("garmentImageHeight").asInt()).isEqualTo(480);
-        assertThat(devicePayload.path("garmentCalibrationValid").asBoolean()).isTrue();
-        assertThat(devicePayload.path("garmentAimPan").asDouble()).isEqualTo(12D);
-        assertThat(devicePayload.path("garmentAimTilt").asDouble()).isEqualTo(-6D);
+        assertThat(devicePayload.path("garmentCalibrationValid").asBoolean()).isFalse();
+        assertThat(devicePayload.has("garmentAimPan")).isFalse();
+        assertThat(devicePayload.has("garmentAimTilt")).isFalse();
         assertThat(devicePayload.has("garmentAimSlider")).isFalse();
+        verify(calibration, never()).predict(eq("lamp-1"), any());
+
+        when(calibration.predict(eq("lamp-1"), eq("PHONE"), any()))
+                .thenReturn(Optional.of(new GarmentAimCalibrationFitter.Pose(12D, -6D)));
+        service.pushStateToDevice("lamp-1", state, "PHONE");
+
+        ArgumentCaptor<String> sourceAwareDeviceJson = ArgumentCaptor.forClass(String.class);
+        verify(devices, org.mockito.Mockito.times(2))
+                .sendToDevice(eq("lamp-1"), sourceAwareDeviceJson.capture());
+        JsonNode sourceAwarePayload = mapper.readTree(
+                sourceAwareDeviceJson.getAllValues().get(1)
+        ).path("data");
+        assertThat(sourceAwarePayload.path("garmentCalibrationValid").asBoolean()).isTrue();
+        assertThat(sourceAwarePayload.path("garmentAimPan").asDouble()).isEqualTo(12D);
+        assertThat(sourceAwarePayload.path("garmentAimTilt").asDouble()).isEqualTo(-6D);
     }
 }

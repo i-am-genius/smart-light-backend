@@ -12,6 +12,7 @@ import java.util.List;
 public class DeviceGarmentAimCalibrationRespVO {
 
     private String lampChipId;
+    private String sourceKey;
     private Integer sampleCount;
     private Integer minimumSampleCount;
     private Integer recommendedSampleCount;
@@ -22,6 +23,8 @@ public class DeviceGarmentAimCalibrationRespVO {
     private Double verticalCoverage;
     private Double rmsePan;
     private Double rmseTilt;
+    private Boolean legacyMigrationRequired;
+    private Integer legacySampleCount;
     private Boolean currentTargetValid;
     private Boolean currentTargetSampled;
     private Double currentCenterX;

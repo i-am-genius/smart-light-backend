@@ -6,6 +6,7 @@ import com.genius.smartlight.service.ai.GarmentAimTarget;
 import com.genius.smartlight.service.device.GarmentAimCalibrationService;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.ai.FabricRecognizeRespVO;
+import com.genius.smartlight.vo.ai.GarmentResultSnapshot;
 import com.genius.smartlight.vo.ai.PersonDetectRespVO;
 import com.genius.smartlight.vo.device.DeviceOnlineStatusRespVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
@@ -15,6 +16,7 @@ import com.genius.smartlight.vo.lux.LuxRespVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -54,6 +56,10 @@ public class WebSocketPushService {
     }
 
     public void pushStateToDevice(String chipId, DeviceRespVO data) {
+        pushStateToDevice(chipId, data, null);
+    }
+
+    public void pushStateToDevice(String chipId, DeviceRespVO data, String sourceKey) {
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("chipId", chipId);
@@ -71,45 +77,81 @@ public class WebSocketPushService {
             payload.put("mainColorRgb", data.getMainColorRgb());
 
             var garmentTarget = GarmentAimTarget.from(data);
-            payload.put("garmentTargetValid", garmentTarget.isPresent());
-            payload.put("garmentCalibrationValid", false);
-            if (garmentTarget.isPresent()) {
-                var target = garmentTarget.get();
-                payload.put("garmentCenterX", target.centerX());
-                payload.put("garmentCenterY", target.centerY());
-                payload.put("garmentX", target.x());
-                payload.put("garmentY", target.y());
-                payload.put("garmentW", target.w());
-                payload.put("garmentH", target.h());
-                payload.put("garmentImageWidth", target.imageWidth());
-                payload.put("garmentImageHeight", target.imageHeight());
-                Optional<GarmentAimCalibrationFitter.Pose> calibratedPose = Optional.empty();
-                if (Boolean.TRUE.equals(data.getGarmentAimEnabled())) {
-                    calibratedPose = garmentAimCalibrationService.predict(chipId, target);
-                }
-                if (calibratedPose.isPresent()) {
-                    var pose = calibratedPose.get();
-                    payload.put("garmentCalibrationValid", true);
-                    payload.put("garmentAimPan", pose.pan());
-                    payload.put("garmentAimTilt", pose.tilt());
-                }
-            }
-
-            Map<String, Object> message = new HashMap<>();
-            message.put("type", "state");
-            message.put("data", payload);
-
-            String json = objectMapper.writeValueAsString(message);
-            boolean sent = deviceSessionManager.sendToDevice(chipId, json);
-
-            if (!sent) {
-                log.warn("Device state push failed, chipId={}, messageType=state", chipId);
-                log.debug("Device state push failed payload preview, chipId={}, payload={}", chipId, preview(json));
-            } else {
-                log.debug("Device state pushed, chipId={}, payload={}", chipId, preview(json));
-            }
+            appendGarmentAim(payload, chipId, garmentTarget, Boolean.TRUE.equals(data.getGarmentAimEnabled()), sourceKey);
+            sendStatePayload(chipId, payload);
         } catch (Exception e) {
             log.error("Device state push error, chipId={}", chipId, e);
+        }
+    }
+
+    public void pushGarmentAimToDevice(
+            String chipId,
+            GarmentResultSnapshot snapshot,
+            String sourceKey,
+            boolean garmentAimEnabled) {
+        if (!StringUtils.hasText(chipId) || snapshot == null) {
+            return;
+        }
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("chipId", chipId);
+            payload.put("garmentAimEnabled", garmentAimEnabled);
+            appendGarmentAim(
+                    payload,
+                    chipId,
+                    GarmentAimTarget.from(snapshot),
+                    garmentAimEnabled,
+                    sourceKey
+            );
+            sendStatePayload(chipId, payload);
+        } catch (Exception exception) {
+            log.error("source-aware garment aim push error, chipId={}, sourceKey={}",
+                    chipId, sourceKey, exception);
+        }
+    }
+
+    private void appendGarmentAim(
+            Map<String, Object> payload,
+            String chipId,
+            Optional<GarmentAimTarget> garmentTarget,
+            boolean garmentAimEnabled,
+            String sourceKey) {
+        payload.put("garmentTargetValid", garmentTarget.isPresent());
+        payload.put("garmentCalibrationValid", false);
+        if (garmentTarget.isEmpty()) {
+            return;
+        }
+        GarmentAimTarget target = garmentTarget.get();
+        payload.put("garmentCenterX", target.centerX());
+        payload.put("garmentCenterY", target.centerY());
+        payload.put("garmentX", target.x());
+        payload.put("garmentY", target.y());
+        payload.put("garmentW", target.w());
+        payload.put("garmentH", target.h());
+        payload.put("garmentImageWidth", target.imageWidth());
+        payload.put("garmentImageHeight", target.imageHeight());
+        if (!garmentAimEnabled || !StringUtils.hasText(sourceKey)) {
+            return;
+        }
+
+        garmentAimCalibrationService.predict(chipId, sourceKey, target).ifPresent(pose -> {
+            payload.put("garmentCalibrationValid", true);
+            payload.put("garmentAimPan", pose.pan());
+            payload.put("garmentAimTilt", pose.tilt());
+        });
+    }
+
+    private void sendStatePayload(String chipId, Map<String, Object> payload) throws Exception {
+        Map<String, Object> message = new HashMap<>();
+        message.put("type", "state");
+        message.put("data", payload);
+        String json = objectMapper.writeValueAsString(message);
+        boolean sent = deviceSessionManager.sendToDevice(chipId, json);
+        if (!sent) {
+            log.warn("Device state push failed, chipId={}, messageType=state", chipId);
+            log.debug("Device state push failed payload preview, chipId={}, payload={}", chipId, preview(json));
+        } else {
+            log.debug("Device state pushed, chipId={}, payload={}", chipId, preview(json));
         }
     }
 
@@ -162,7 +204,6 @@ public class WebSocketPushService {
         data.put("segmentationFallback", result.getSegmentationFallback());
         data.put("outfitType", result.getOutfitType());
         data.put("garments", result.getGarments());
-
         broadcastToStore(storeId, "fabricRecognize", data);
     }
 
@@ -222,12 +263,10 @@ public class WebSocketPushService {
         data.put("ip", ip);
         data.put("deviceType", deviceType);
         data.put("added", added);
-
         if (storeId == null) {
             broadcastAll("announce", data);
             return;
         }
-
         broadcastToStore(storeId, "announce", data);
     }
 
@@ -242,14 +281,12 @@ public class WebSocketPushService {
 
     public boolean pushRawToDevice(String chipId, String message) {
         boolean sent = deviceSessionManager.sendToDevice(chipId, message);
-
         if (!sent) {
             log.warn("Device command push failed, chipId={}", chipId);
             log.debug("Device command push failed message preview, chipId={}, message={}", chipId, preview(message));
         } else {
             log.debug("Device command pushed, chipId={}, message={}", chipId, preview(message));
         }
-
         return sent;
     }
 

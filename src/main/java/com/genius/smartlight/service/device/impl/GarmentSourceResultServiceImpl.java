@@ -32,9 +32,7 @@ public class GarmentSourceResultServiceImpl implements GarmentSourceResultServic
         if (!StringUtils.hasText(lampChipId) || !StringUtils.hasText(sourceKey)) {
             return;
         }
-        DeviceDO device = deviceMapper.selectOne(new LambdaQueryWrapper<DeviceDO>()
-                .eq(DeviceDO::getChipId, lampChipId.trim())
-                .last("limit 1"));
+        DeviceDO device = findLamp(lampChipId);
         if (device == null || !StringUtils.hasText(device.getGarmentResultJson())) {
             return;
         }
@@ -42,6 +40,7 @@ public class GarmentSourceResultServiceImpl implements GarmentSourceResultServic
         String normalizedSourceKey = sourceKey.trim();
         SourceResultDocument document = read(device.getGarmentSourceResultJson());
         document.getSources().put(normalizedSourceKey, device.getGarmentResultJson());
+        document.setLatestSourceKey(normalizedSourceKey);
         document.setVersion(1);
         try {
             device.setGarmentSourceResultJson(objectMapper.writeValueAsString(document));
@@ -57,14 +56,70 @@ public class GarmentSourceResultServiceImpl implements GarmentSourceResultServic
             throw new ServiceException("拍摄来源识别结果序列化失败");
         }
 
-        GarmentResultCodec.decode(device.getGarmentResultJson()).ifPresent(snapshot ->
+        pushSnapshot(device, normalizedSourceKey, device.getGarmentResultJson());
+    }
+
+    @Override
+    public void pushLatestResult(String lampChipId) {
+        if (!StringUtils.hasText(lampChipId)) {
+            return;
+        }
+        DeviceDO device = findLamp(lampChipId);
+        if (device == null || !Boolean.TRUE.equals(device.getGarmentAimEnabled())) {
+            return;
+        }
+
+        SourceResultDocument document = read(device.getGarmentSourceResultJson());
+        String sourceKey = resolveLatestSourceKey(document, device.getGarmentResultJson());
+        if (!StringUtils.hasText(sourceKey)) {
+            log.debug("latest garment source unavailable, chipId={}", lampChipId);
+            return;
+        }
+        String sourceResultJson = document.getSources().get(sourceKey);
+        if (!StringUtils.hasText(sourceResultJson)) {
+            log.debug("latest garment source result unavailable, chipId={}, sourceKey={}", lampChipId, sourceKey);
+            return;
+        }
+        pushSnapshot(device, sourceKey, sourceResultJson);
+    }
+
+    private DeviceDO findLamp(String lampChipId) {
+        return deviceMapper.selectOne(new LambdaQueryWrapper<DeviceDO>()
+                .eq(DeviceDO::getChipId, lampChipId.trim())
+                .last("limit 1"));
+    }
+
+    private void pushSnapshot(DeviceDO device, String sourceKey, String resultJson) {
+        GarmentResultCodec.decode(resultJson).ifPresent(snapshot ->
                 webSocketPushService.pushGarmentAimToDevice(
                         device.getChipId(),
                         snapshot,
-                        normalizedSourceKey,
+                        sourceKey,
                         Boolean.TRUE.equals(device.getGarmentAimEnabled())
                 )
         );
+    }
+
+    private String resolveLatestSourceKey(SourceResultDocument document, String globalLatestJson) {
+        if (StringUtils.hasText(document.getLatestSourceKey())
+                && document.getSources().containsKey(document.getLatestSourceKey())) {
+            return document.getLatestSourceKey();
+        }
+        if (!StringUtils.hasText(globalLatestJson)) {
+            return null;
+        }
+
+        String match = null;
+        for (Map.Entry<String, String> entry : document.getSources().entrySet()) {
+            if (!globalLatestJson.equals(entry.getValue())) {
+                continue;
+            }
+            if (match != null && !match.equals(entry.getKey())) {
+                return null;
+            }
+            match = entry.getKey();
+        }
+        return match;
     }
 
     private SourceResultDocument read(String json) {
@@ -87,6 +142,7 @@ public class GarmentSourceResultServiceImpl implements GarmentSourceResultServic
     @Data
     public static class SourceResultDocument {
         private Integer version = 1;
+        private String latestSourceKey;
         private Map<String, String> sources = new LinkedHashMap<>();
     }
 }

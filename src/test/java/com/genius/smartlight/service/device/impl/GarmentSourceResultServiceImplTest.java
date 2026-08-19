@@ -13,7 +13,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -39,7 +41,7 @@ class GarmentSourceResultServiceImplTest {
         lamp.setGarmentAimEnabled(true);
         lamp.setGarmentResultJson(phoneJson());
         when(deviceMapper.selectOne(any())).thenReturn(lamp);
-        when(deviceMapper.updateById(any(DeviceDO.class))).thenReturn(1);
+        lenient().when(deviceMapper.updateById(any(DeviceDO.class))).thenReturn(1);
     }
 
     @Test
@@ -123,7 +125,7 @@ class GarmentSourceResultServiceImplTest {
         service.pushLatestResult("LAMP-1");
 
         verify(webSocketPushService, never()).pushGarmentAimToDevice(
-                any(), any(), any(), any(Boolean.class)
+                any(), any(), any(), anyBoolean()
         );
     }
 

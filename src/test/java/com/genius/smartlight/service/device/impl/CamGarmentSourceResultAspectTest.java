@@ -29,7 +29,7 @@ class CamGarmentSourceResultAspectTest {
     }
 
     @Test
-    void stopsStandardLightingAsSoonAsImageIsReceived() {
+    void stopsOnlyMatchingCameraLeaseAsSoonAsImageIsReceived() {
         GarmentSourceResultService sourceService = mock(GarmentSourceResultService.class);
         CaptureLightingService captureLightingService = mock(CaptureLightingService.class);
         CamGarmentSourceResultAspect aspect = new CamGarmentSourceResultAspect(sourceService, captureLightingService);
@@ -41,7 +41,7 @@ class CamGarmentSourceResultAspectTest {
 
         aspect.onCameraCaptureResult(task, 1L);
 
-        verify(captureLightingService).stop("LAMP-1");
+        verify(captureLightingService).stop("LAMP-1", "CAMERA:task-2");
         verifyNoInteractions(sourceService);
     }
 }

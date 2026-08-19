@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
+import com.genius.smartlight.service.ai.GarmentResultCodec;
 import com.genius.smartlight.service.device.GarmentSourceResultService;
+import com.genius.smartlight.websocket.WebSocketPushService;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +25,7 @@ public class GarmentSourceResultServiceImpl implements GarmentSourceResultServic
 
     private final DeviceMapper deviceMapper;
     private final ObjectMapper objectMapper;
+    private final WebSocketPushService webSocketPushService;
 
     @Override
     public void saveLatestResult(String lampChipId, String sourceKey) {
@@ -36,8 +39,9 @@ public class GarmentSourceResultServiceImpl implements GarmentSourceResultServic
             return;
         }
 
+        String normalizedSourceKey = sourceKey.trim();
         SourceResultDocument document = read(device.getGarmentSourceResultJson());
-        document.getSources().put(sourceKey.trim(), device.getGarmentResultJson());
+        document.getSources().put(normalizedSourceKey, device.getGarmentResultJson());
         document.setVersion(1);
         try {
             device.setGarmentSourceResultJson(objectMapper.writeValueAsString(document));
@@ -49,9 +53,18 @@ public class GarmentSourceResultServiceImpl implements GarmentSourceResultServic
             throw exception;
         } catch (Exception exception) {
             log.warn("save garment source result failed, chipId={}, sourceKey={}, exceptionType={}",
-                    lampChipId, sourceKey, exception.getClass().getSimpleName());
+                    lampChipId, normalizedSourceKey, exception.getClass().getSimpleName());
             throw new ServiceException("拍摄来源识别结果序列化失败");
         }
+
+        GarmentResultCodec.decode(device.getGarmentResultJson()).ifPresent(snapshot ->
+                webSocketPushService.pushGarmentAimToDevice(
+                        device.getChipId(),
+                        snapshot,
+                        normalizedSourceKey,
+                        Boolean.TRUE.equals(device.getGarmentAimEnabled())
+                )
+        );
     }
 
     private SourceResultDocument read(String json) {

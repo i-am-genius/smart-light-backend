@@ -9,4 +9,6 @@ public interface GarmentSourceResultService {
     }
 
     void saveLatestResult(String lampChipId, String sourceKey);
+
+    void pushLatestResult(String lampChipId);
 }

@@ -72,6 +72,9 @@ public class DeviceDO {
     @TableField("garment_result_json")
     private String garmentResultJson;
 
+    @TableField("garment_source_result_json")
+    private String garmentSourceResultJson;
+
     @TableField("garment_aim_calibration_json")
     private String garmentAimCalibrationJson;
 

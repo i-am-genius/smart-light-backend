@@ -18,6 +18,7 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class CamGarmentSourceResultAspect {
 
+    private static final String CAMERA_SESSION_PREFIX = "CAMERA:";
     private static final Set<String> CAPTURE_LIGHT_STOP_STATUSES = Set.of(
             "image_received",
             "upload_failed",
@@ -39,9 +40,14 @@ public class CamGarmentSourceResultAspect {
         }
 
         String status = task.getStatus();
-        if (status != null && CAPTURE_LIGHT_STOP_STATUSES.contains(status)) {
+        if (status != null
+                && CAPTURE_LIGHT_STOP_STATUSES.contains(status)
+                && StringUtils.hasText(task.getTaskId())) {
             try {
-                captureLightingService.stop(task.getTargetChipId());
+                captureLightingService.stop(
+                        task.getTargetChipId(),
+                        CAMERA_SESSION_PREFIX + task.getTaskId().trim()
+                );
             } catch (RuntimeException exception) {
                 log.warn("camera capture lighting stop failed, taskId={}, targetChipId={}, status={}",
                         task.getTaskId(), task.getTargetChipId(), status, exception);

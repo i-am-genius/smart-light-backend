@@ -17,10 +17,12 @@ public class DeviceCaptureLightingController {
     private final CaptureLightingService captureLightingService;
 
     @PostMapping("/start")
-    public CommonResult<String> start(@PathVariable String lampChipId) {
-        String sessionId = captureLightingService.startStandard(lampChipId, null);
+    public CommonResult<String> start(
+            @PathVariable String lampChipId,
+            @RequestParam(required = false) String sessionId) {
+        String normalizedSessionId = captureLightingService.startStandard(lampChipId, sessionId);
         sleepSettleTime();
-        return CommonResult.success(sessionId);
+        return CommonResult.success(normalizedSessionId);
     }
 
     @PostMapping("/stop")

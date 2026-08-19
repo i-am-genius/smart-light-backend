@@ -17,6 +17,8 @@ import org.springframework.util.StringUtils;
 @RequiredArgsConstructor
 public class CamCaptureLightingAspect {
 
+    private static final String CAMERA_SESSION_PREFIX = "CAMERA:";
+
     private final CaptureLightingService captureLightingService;
     private final ObjectMapper objectMapper;
 
@@ -31,27 +33,29 @@ public class CamCaptureLightingAspect {
         }
 
         String targetLampChipId = root.path("targetChipId").asText("").trim();
-        if (!StringUtils.hasText(targetLampChipId)) {
+        String taskId = root.path("taskId").asText("").trim();
+        if (!StringUtils.hasText(targetLampChipId) || !StringUtils.hasText(taskId)) {
             return joinPoint.proceed();
         }
 
+        String sessionId = CAMERA_SESSION_PREFIX + taskId;
         boolean started = false;
         try {
-            captureLightingService.startStandard(targetLampChipId);
+            captureLightingService.startStandard(targetLampChipId, sessionId);
             started = true;
             sleepSettleTime();
             Object result = joinPoint.proceed();
             if (result instanceof Boolean sent && !sent) {
-                captureLightingService.stop(targetLampChipId);
+                captureLightingService.stop(targetLampChipId, sessionId);
             }
             return result;
         } catch (Throwable throwable) {
             if (started) {
                 try {
-                    captureLightingService.stop(targetLampChipId);
+                    captureLightingService.stop(targetLampChipId, sessionId);
                 } catch (RuntimeException stopException) {
-                    log.warn("failed to stop capture lighting after camera command error, lamp={}",
-                            targetLampChipId, stopException);
+                    log.warn("failed to stop capture lighting after camera command error, lamp={}, taskId={}",
+                            targetLampChipId, taskId, stopException);
                 }
             }
             throw throwable;

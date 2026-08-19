@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -16,15 +17,17 @@ public class DeviceCaptureLightingController {
     private final CaptureLightingService captureLightingService;
 
     @PostMapping("/start")
-    public CommonResult<Boolean> start(@PathVariable String lampChipId) {
-        captureLightingService.startStandard(lampChipId);
+    public CommonResult<String> start(@PathVariable String lampChipId) {
+        String sessionId = captureLightingService.startStandard(lampChipId, null);
         sleepSettleTime();
-        return CommonResult.success(true);
+        return CommonResult.success(sessionId);
     }
 
     @PostMapping("/stop")
-    public CommonResult<Boolean> stop(@PathVariable String lampChipId) {
-        captureLightingService.stop(lampChipId);
+    public CommonResult<Boolean> stop(
+            @PathVariable String lampChipId,
+            @RequestParam String sessionId) {
+        captureLightingService.stop(lampChipId, sessionId);
         return CommonResult.success(true);
     }
 

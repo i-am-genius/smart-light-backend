@@ -38,16 +38,17 @@ public class CamGarmentSourceResultAspect {
             return;
         }
 
-        if (CAPTURE_LIGHT_STOP_STATUSES.contains(task.getStatus())) {
+        String status = task.getStatus();
+        if (status != null && CAPTURE_LIGHT_STOP_STATUSES.contains(status)) {
             try {
                 captureLightingService.stop(task.getTargetChipId());
             } catch (RuntimeException exception) {
                 log.warn("camera capture lighting stop failed, taskId={}, targetChipId={}, status={}",
-                        task.getTaskId(), task.getTargetChipId(), task.getStatus(), exception);
+                        task.getTaskId(), task.getTargetChipId(), status, exception);
             }
         }
 
-        if (!"ai_done".equals(task.getStatus()) || !StringUtils.hasText(task.getCamChipId())) {
+        if (!"ai_done".equals(status) || !StringUtils.hasText(task.getCamChipId())) {
             return;
         }
         try {

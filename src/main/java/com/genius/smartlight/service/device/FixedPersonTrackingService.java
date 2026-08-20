@@ -7,6 +7,7 @@ import com.genius.smartlight.common.DeviceTypeUtil;
 import com.genius.smartlight.common.ServiceException;
 import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
+import com.genius.smartlight.dal.mysql.DurationRecordMapper;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
@@ -16,7 +17,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -25,11 +28,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Control-plane coordinator for person tracking.
- *
- * ROI/presence areas are intentionally not used. A Lamp ToF proximity event
- * identifies the physical area. High-frequency pan/tilt data stays on the LAN
- * between the camera node and the selected Lamp over UDP.
+ * ROI-free person tracking coordinator.
+ * Lamp ToF identifies the physical area; high-frequency pan/tilt stays on the
+ * LAN between Camera and Lamp over UDP.
  */
 @Slf4j
 @Service
@@ -40,12 +41,14 @@ public class FixedPersonTrackingService {
     public static final int TRACKING_UDP_PORT = 4211;
 
     private final DeviceMapper deviceMapper;
+    private final DurationRecordMapper durationRecordMapper;
     private final DeviceSessionManager deviceSessionManager;
     private final WebSocketPushService webSocketPushService;
     private final DeviceCamCaptureConfigService captureConfigService;
     private final ObjectMapper objectMapper;
 
     private final Map<String, Boolean> nearbyByLamp = new ConcurrentHashMap<>();
+    private final Map<String, LocalDateTime> nearbySinceByLamp = new ConcurrentHashMap<>();
     private final Map<String, String> clothStateByLamp = new ConcurrentHashMap<>();
     private final Map<String, TrackingSession> activeByCam = new ConcurrentHashMap<>();
     private final Map<String, String> activeCamByLamp = new ConcurrentHashMap<>();
@@ -55,12 +58,23 @@ public class FixedPersonTrackingService {
         if (lamp == null) {
             return;
         }
-        nearbyByLamp.put(lamp, nearby);
-        if (!nearby) {
-            stopAutoSessionForLamp(lamp, "ToF target left");
+
+        boolean wasNearby = Boolean.TRUE.equals(nearbyByLamp.put(lamp, nearby));
+        LocalDateTime now = LocalDateTime.now();
+        if (nearby) {
+            if (!wasNearby) {
+                nearbySinceByLamp.put(lamp, now);
+            }
+            evaluateAutoTracking(lamp);
             return;
         }
-        evaluateAutoTracking(lamp);
+
+        if (wasNearby) {
+            persistDwell(lamp, nearbySinceByLamp.remove(lamp), now);
+        } else {
+            nearbySinceByLamp.remove(lamp);
+        }
+        stopAutoSessionForLamp(lamp, "ToF target left");
     }
 
     public void onLampClothState(String lampChipId, String clothState) {
@@ -97,11 +111,11 @@ public class FixedPersonTrackingService {
         TrackingSession session = activeByCam.get(camChipId);
         if (session == null) {
             DeviceDO cam = requireCam(camChipId);
-            return status(cam.getChipId(), reqVO.getTargetChipId(), reqVO.getTargetIndex(),
+            return status(null, cam.getChipId(), reqVO.getTargetChipId(), reqVO.getTargetIndex(),
                     "stopped", "no active tracking session", cam.getStoreId());
         }
         stopSession(session, "manual tracking stopped", true);
-        return status(session.camChipId(), session.lampChipId(), session.targetIndex(),
+        return status(session.sessionId(), session.camChipId(), session.lampChipId(), session.targetIndex(),
                 "stopped", "manual tracking stopped", session.storeId());
     }
 
@@ -109,8 +123,8 @@ public class FixedPersonTrackingService {
         if (reqVO == null) {
             return;
         }
-        String status = normalizeStatus(reqVO.getTrackingStatus());
-        if (status == null) {
+        String trackingStatus = normalizeStatus(reqVO.getTrackingStatus());
+        if (trackingStatus == null) {
             return;
         }
         TrackingSession session = findSession(reqVO);
@@ -125,14 +139,14 @@ public class FixedPersonTrackingService {
             return;
         }
 
-        if (Set.of("error", "lost", "stopped", "timeout").contains(status)) {
-            stopSession(session, "tracking " + status, true);
+        if (Set.of("error", "lost", "stopped", "timeout").contains(trackingStatus)) {
+            stopSession(session, "tracking " + trackingStatus, true);
             return;
         }
 
-        if (Set.of("armed", "tracking").contains(status)) {
-            status(session.camChipId(), session.lampChipId(), session.targetIndex(),
-                    status, reqVO.getMessage(), session.storeId());
+        if (Set.of("armed", "tracking").contains(trackingStatus)) {
+            status(session.sessionId(), session.camChipId(), session.lampChipId(), session.targetIndex(),
+                    trackingStatus, reqVO.getMessage(), session.storeId());
         }
     }
 
@@ -144,11 +158,39 @@ public class FixedPersonTrackingService {
         if (normalized == null) {
             return;
         }
+        if (nearbySinceByLamp.containsKey(normalized)) {
+            persistDwell(normalized, nearbySinceByLamp.remove(normalized), LocalDateTime.now());
+            nearbyByLamp.put(normalized, false);
+        }
         activeByCam.values().stream()
                 .filter(session -> sameChipId(normalized, session.camChipId())
                         || sameChipId(normalized, session.lampChipId()))
                 .findFirst()
                 .ifPresent(session -> stopSession(session, "tracking device offline", true));
+    }
+
+    private void persistDwell(String lampChipId, LocalDateTime startedAt, LocalDateTime endedAt) {
+        if (startedAt == null || endedAt == null) {
+            return;
+        }
+        long durationMs = ChronoUnit.MILLIS.between(startedAt, endedAt);
+        if (durationMs <= 0L || durationMs > 3_600_000L) {
+            return;
+        }
+        try {
+            DeviceDO lamp = requireLamp(lampChipId);
+            durationRecordMapper.insertOrIncrease(
+                    lamp.getId(),
+                    lamp.getStoreId(),
+                    lamp.getChipId(),
+                    LocalDate.now(),
+                    durationMs,
+                    endedAt
+            );
+        } catch (RuntimeException exception) {
+            log.warn("failed to persist ToF dwell duration, lampChipId={}, durationMs={}",
+                    lampChipId, durationMs, exception);
+        }
     }
 
     private void evaluateAutoTracking(String lampChipId) {
@@ -179,7 +221,7 @@ public class FixedPersonTrackingService {
         } catch (RuntimeException exception) {
             log.warn("failed to start ToF tracking, camChipId={}, lampChipId={}",
                     cam.getChipId(), lamp.getChipId(), exception);
-            status(cam.getChipId(), lamp.getChipId(), target.targetIndex(),
+            status(null, cam.getChipId(), lamp.getChipId(), target.targetIndex(),
                     "error", exception.getMessage(), cam.getStoreId());
         }
     }
@@ -208,7 +250,7 @@ public class FixedPersonTrackingService {
         TrackingSession existing = activeByCam.get(cam.getChipId());
         if (existing != null) {
             if (sameChipId(existing.lampChipId(), lamp.getChipId())) {
-                return status(existing.camChipId(), existing.lampChipId(), existing.targetIndex(),
+                return status(existing.sessionId(), existing.camChipId(), existing.lampChipId(), existing.targetIndex(),
                         "tracking", "tracking session already active", existing.storeId());
             }
             stopSession(existing, "tracking target changed", true);
@@ -253,7 +295,7 @@ public class FixedPersonTrackingService {
         );
         activeByCam.put(cam.getChipId(), session);
         activeCamByLamp.put(lamp.getChipId(), cam.getChipId());
-        return status(cam.getChipId(), lamp.getChipId(), targetIndex,
+        return status(sessionId, cam.getChipId(), lamp.getChipId(), targetIndex,
                 "armed", successMessage, cam.getStoreId());
     }
 
@@ -276,7 +318,7 @@ public class FixedPersonTrackingService {
         sendLampStop(session.lampChipId(), session.camChipId(), session.sessionId(), reason);
         sendCameraStop(session.camChipId(), session.lampChipId(), session.sessionId(), reason);
         if (pushStopped) {
-            status(session.camChipId(), session.lampChipId(), session.targetIndex(),
+            status(session.sessionId(), session.camChipId(), session.lampChipId(), session.targetIndex(),
                     "stopped", reason, session.storeId());
         }
     }
@@ -326,6 +368,7 @@ public class FixedPersonTrackingService {
     }
 
     private DeviceTrackingStatusRespVO status(
+            String sessionId,
             String camChipId,
             String lampChipId,
             Integer targetIndex,
@@ -336,6 +379,7 @@ public class FixedPersonTrackingService {
         resp.setChipId(camChipId);
         resp.setRole("cam");
         resp.setTrackingStatus(trackingStatus);
+        resp.setSessionId(sessionId);
         resp.setCamChipId(camChipId);
         resp.setLampChipId(lampChipId);
         resp.setTargetIndex(targetIndex);

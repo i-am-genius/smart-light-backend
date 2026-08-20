@@ -11,6 +11,7 @@ public class DeviceTrackingStatusReqVO {
     private String chipId;
     private String role;
     private String trackingStatus;
+    private String sessionId;
     private String camChipId;
     private String lampChipId;
     private Integer targetIndex;

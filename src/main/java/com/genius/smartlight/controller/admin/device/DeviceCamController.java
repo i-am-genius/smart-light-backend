@@ -1,14 +1,16 @@
 package com.genius.smartlight.controller.admin.device;
 
 import com.genius.smartlight.common.CommonResult;
+import com.genius.smartlight.service.device.DeviceCamCaptureConfigService;
 import com.genius.smartlight.service.device.DeviceCamService;
+import com.genius.smartlight.service.device.FixedPersonTrackingService;
 import com.genius.smartlight.vo.device.DeviceCamCaptureBatchReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureBatchRespVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceRespVO;
-import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusRespVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
@@ -40,35 +42,37 @@ import org.springframework.web.servlet.HandlerMapping;
 import java.io.IOException;
 import java.nio.file.Files;
 
-@Tag(name = "cam 视觉节点", description = "独立 cam 设备 ROI、presence、人流、拍摄、追踪状态接口")
+@Tag(name = "cam 视觉节点", description = "独立 cam 设备拍摄、人流与人物追踪接口")
 @RestController
 @RequestMapping("/admin/device")
 @RequiredArgsConstructor
 public class DeviceCamController {
 
     private final DeviceCamService deviceCamService;
+    private final DeviceCamCaptureConfigService captureConfigService;
+    private final FixedPersonTrackingService fixedPersonTrackingService;
 
-    @Operation(summary = "读取 cam ROI 配置")
-    @GetMapping("/cam/{camChipId}/roi")
-    public CommonResult<DeviceCamRoiConfigVO> getRoi(@PathVariable String camChipId) {
-        return CommonResult.success(deviceCamService.getRoiConfig(camChipId));
+    @Operation(summary = "读取 cam 拍摄对位配置")
+    @GetMapping("/cam/{camChipId}/capture-config")
+    public CommonResult<DeviceCamCaptureConfigVO> getCaptureConfig(@PathVariable String camChipId) {
+        return CommonResult.success(captureConfigService.getForCurrentStore(camChipId));
     }
 
-    @Operation(summary = "保存 cam ROI 配置")
-    @PutMapping("/cam/{camChipId}/roi")
-    public CommonResult<DeviceCamRoiConfigVO> saveRoi(
+    @Operation(summary = "保存 cam 拍摄对位配置")
+    @PutMapping("/cam/{camChipId}/capture-config")
+    public CommonResult<DeviceCamCaptureConfigVO> saveCaptureConfig(
             @PathVariable String camChipId,
-            @RequestBody DeviceCamRoiConfigVO reqVO) {
-        return CommonResult.success(deviceCamService.saveRoiConfig(camChipId, reqVO));
+            @RequestBody DeviceCamCaptureConfigVO reqVO) {
+        return CommonResult.success(captureConfigService.saveForCurrentStore(camChipId, reqVO));
     }
 
-    @Operation(summary = "cam 上报本地 ROI presence 结果")
+    @Operation(summary = "cam 上报人流 presence；区域归属由 Lamp ToF 提供")
     @PostMapping("/cam/presence")
     public CommonResult<DeviceCamPresenceRespVO> reportPresence(@Valid @RequestBody DeviceCamPresenceReqVO reqVO) {
         return CommonResult.success(deviceCamService.reportPresence(reqVO));
     }
 
-    @Operation(summary = "读取 cam 当前 ROI presence 状态")
+    @Operation(summary = "读取 cam 当前人流 presence 状态")
     @GetMapping("/cam/{camChipId}/presence")
     public CommonResult<DeviceCamPresenceRespVO> getPresence(@PathVariable String camChipId) {
         return CommonResult.success(deviceCamService.getPresence(camChipId));
@@ -86,18 +90,18 @@ public class DeviceCamController {
         return CommonResult.success(deviceCamService.getStatus(camChipId));
     }
 
-    @Operation(summary = "手动开始 cam 追踪")
+    @Operation(summary = "手动开始 cam 到目标灯的 UDP 人物追踪")
     @PostMapping("/cam/tracking/start")
     public CommonResult<DeviceTrackingStatusRespVO> startTracking(
             @Valid @RequestBody DeviceCamTrackingControlReqVO reqVO) {
-        return CommonResult.success(deviceCamService.startTrackingManually(reqVO));
+        return CommonResult.success(fixedPersonTrackingService.startManually(reqVO));
     }
 
-    @Operation(summary = "手动停止 cam 追踪")
+    @Operation(summary = "手动停止 cam 人物追踪")
     @PostMapping("/cam/tracking/stop")
     public CommonResult<DeviceTrackingStatusRespVO> stopTracking(
             @Valid @RequestBody DeviceCamTrackingControlReqVO reqVO) {
-        return CommonResult.success(deviceCamService.stopTrackingManually(reqVO));
+        return CommonResult.success(fixedPersonTrackingService.stopManually(reqVO));
     }
 
     @Operation(summary = "创建 cam 服装拍摄任务")
@@ -107,7 +111,7 @@ public class DeviceCamController {
         return CommonResult.success(deviceCamService.createCaptureTask(reqVO));
     }
 
-    @Operation(summary = "按滑轨位置依次创建三个区域的 cam 批量拍摄任务")
+    @Operation(summary = "按滑轨位置依次创建三个拍摄目标的 cam 批量拍摄任务")
     @PostMapping("/cam/capture-batch")
     public CommonResult<DeviceCamCaptureBatchRespVO> createCaptureBatch(
             @Valid @RequestBody DeviceCamCaptureBatchReqVO reqVO) {
@@ -155,13 +159,17 @@ public class DeviceCamController {
     @PostMapping("/lamp/cloth-state")
     public CommonResult<DeviceLampClothStateRespVO> reportLampClothState(
             @Valid @RequestBody DeviceLampClothStateReqVO reqVO) {
-        return CommonResult.success(deviceCamService.reportLampClothState(reqVO));
+        DeviceLampClothStateRespVO result = deviceCamService.reportLampClothState(reqVO);
+        fixedPersonTrackingService.onLampClothState(reqVO.getChipId(), reqVO.getClothState());
+        return CommonResult.success(result);
     }
 
     @Operation(summary = "cam/lamp 上报低频追踪状态")
     @PostMapping("/tracking/status")
     public CommonResult<DeviceTrackingStatusRespVO> reportTrackingStatus(
             @Valid @RequestBody DeviceTrackingStatusReqVO reqVO) {
-        return CommonResult.success(deviceCamService.reportTrackingStatus(reqVO));
+        DeviceTrackingStatusRespVO result = deviceCamService.reportTrackingStatus(reqVO);
+        fixedPersonTrackingService.onTrackingStatus(reqVO);
+        return CommonResult.success(result);
     }
 }

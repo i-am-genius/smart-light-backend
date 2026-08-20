@@ -11,11 +11,11 @@ import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.service.device.DeviceCamService;
 import com.genius.smartlight.service.device.DeviceLastSeenService;
 import com.genius.smartlight.service.device.DeviceOnlinePushService;
+import com.genius.smartlight.service.device.FixedPersonTrackingService;
 import com.genius.smartlight.service.device.OtaProgressStore;
 import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
 import com.genius.smartlight.vo.device.DeviceLampProximityStateReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
-import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceRespVO;
 import com.genius.smartlight.vo.device.DeviceSliderStatusReqVO;
@@ -28,8 +28,6 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 import java.time.LocalDateTime;
 
@@ -46,6 +44,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
     private final OtaProgressStore otaProgressStore;
     private final DeviceLastSeenService deviceLastSeenService;
     private final DeviceCamService deviceCamService;
+    private final FixedPersonTrackingService fixedPersonTrackingService;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
@@ -91,7 +90,6 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 ack.put("data", "ok");
                 ack.put("deviceUploadToken", uploadToken);
                 session.sendMessage(new TextMessage(objectMapper.writeValueAsString(ack)));
-                pushCamRoiConfigIfNeeded(session, knownDevice);
                 return;
             }
 
@@ -119,6 +117,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                     reqVO.setTracking(node.path("tracking").asBoolean());
                 }
                 deviceCamService.reportLampClothState(reqVO);
+                fixedPersonTrackingService.onLampClothState(chipId, reqVO.getClothState());
                 return;
             }
 
@@ -129,6 +128,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 reqVO.setChipId(chipId);
                 reqVO.setNearby(node.path("nearby").asBoolean(false));
                 deviceCamService.reportLampProximityState(reqVO);
+                fixedPersonTrackingService.onLampProximity(chipId, Boolean.TRUE.equals(reqVO.getNearby()));
                 return;
             }
 
@@ -162,14 +162,8 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                     reqVO.setConfidence(node.path("confidence").asDouble());
                 }
                 reqVO.setDetectTime(node.path("detectTime").asText(node.path("timestamp").asText(null)));
-                JsonNode areasNode = node.get("areas");
-                if (areasNode != null && areasNode.isArray()) {
-                    List<DeviceCamPresenceReqVO.PresenceArea> areas = new ArrayList<>();
-                    for (JsonNode areaNode : areasNode) {
-                        areas.add(objectMapper.treeToValue(areaNode, DeviceCamPresenceReqVO.PresenceArea.class));
-                    }
-                    reqVO.setAreas(areas);
-                }
+                // ROI presence areas are retired. Camera presence is now only
+                // global person-flow telemetry; Lamp ToF identifies the area.
                 deviceCamService.reportPresence(reqVO);
                 return;
             }
@@ -235,6 +229,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 reqVO.setChipId(chipId);
                 reqVO.setRole(node.path("role").asText(null));
                 reqVO.setTrackingStatus(node.path("trackingStatus").asText(node.path("status").asText("unknown")));
+                reqVO.setSessionId(node.path("sessionId").asText(null));
                 reqVO.setCamChipId(node.path("camChipId").asText(null));
                 reqVO.setLampChipId(node.path("lampChipId").asText(node.path("targetChipId").asText(null)));
                 if (node.hasNonNull("targetIndex")) {
@@ -250,6 +245,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 }
                 reqVO.setMessage(node.path("message").asText(null));
                 deviceCamService.reportTrackingStatus(reqVO);
+                fixedPersonTrackingService.onTrackingStatus(reqVO);
                 return;
             }
 
@@ -289,18 +285,6 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
             chipId = node.path("id").asText(null);
         }
         return deviceSessionManager.normalizeChipId(chipId);
-    }
-
-    private void pushCamRoiConfigIfNeeded(WebSocketSession session, DeviceDO device) {
-        if (!DeviceTypeUtil.isCam(device.getDeviceType())) {
-            return;
-        }
-        try {
-            DeviceCamRoiConfigVO config = deviceCamService.getRoiConfigForDevice(device.getChipId());
-            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(WsMessage.of("cameraRoiConfig", config))));
-        } catch (Exception e) {
-            log.warn("push cam roi config failed, chipId={}", device.getChipId(), e);
-        }
     }
 
     private void syncFirmwareInfo(String chipId, JsonNode node) {
@@ -349,7 +333,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
             channel = node.path("channel").asText(null);
         }
         if (channel != null && !channel.isBlank()) {
-            device.setFirmwareChannel(channel);
+            device.setFirmwareChannel(channel.trim().toLowerCase(Locale.ROOT));
             changed = true;
         }
 
@@ -497,6 +481,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                     session.getId(), chipId != null ? chipId : "-");
         }
         if (chipId != null) {
+            fixedPersonTrackingService.onDeviceOnlineStatusChanged(chipId, false);
             deviceOnlinePushService.pushIfChanged(chipId);
         }
     }

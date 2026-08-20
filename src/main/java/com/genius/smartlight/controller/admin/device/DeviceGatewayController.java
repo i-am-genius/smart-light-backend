@@ -127,12 +127,13 @@ public class DeviceGatewayController {
         return device;
     }
 
-    @Operation(summary = "控制 cam 摄像头三轴云台", description = "仅支持 deviceType=cam 的独立摄像头设备。下发 ptzControl 指令，不携带亮度、色温或自动模式字段。")
+    @Operation(summary = "控制摄像头设备三轴云台", description = "支持 deviceType=cam 或 cam_capture。下发 ptzControl 指令，不携带亮度、色温或自动模式字段。")
     @PostMapping("/cam/ptz")
     public CommonResult<Boolean> camPtzControl(@Valid @RequestBody DeviceCamPtzReqVO reqVO) {
         DeviceDO device = getDeviceByChipIdForCurrentStore(reqVO.getChipId());
-        if (!DeviceTypeUtil.isCam(device.getDeviceType())) {
-            throw new ServiceException("Only cam devices support this PTZ endpoint");
+        if (!DeviceTypeUtil.isCam(device.getDeviceType())
+                && !DeviceTypeUtil.isCaptureController(device.getDeviceType())) {
+            throw new ServiceException("Only cam or cam_capture devices support this PTZ endpoint");
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();

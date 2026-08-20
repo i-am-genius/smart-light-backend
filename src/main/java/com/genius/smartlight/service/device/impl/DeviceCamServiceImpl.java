@@ -122,7 +122,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private final Map<String, PendingCaptureMotion> pendingCaptureMotions = new ConcurrentHashMap<>();
     private final Map<String, String> activeCaptureTaskBySliderLamp = new ConcurrentHashMap<>();
     private final Map<String, String> activeCaptureTaskByCam = new ConcurrentHashMap<>();
+    private final Map<String, String> activeCaptureTaskByCaptureController = new ConcurrentHashMap<>();
     private final Map<String, String> captureSliderLampByTask = new ConcurrentHashMap<>();
+    private final Map<String, String> captureControllerByTask = new ConcurrentHashMap<>();
     private final Map<String, PendingBatchReturn> pendingBatchReturns = new ConcurrentHashMap<>();
     private final ScheduledExecutorService captureTimeoutExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "cam-capture-timeout");
@@ -153,6 +155,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         DeviceCamRoiConfigVO normalized = normalizeConfig(cam.getChipId(), config);
         if (notBlank(normalized.getSliderLampChipId())) {
             requireLampLikeForCurrentStore(normalized.getSliderLampChipId());
+        }
+        if (notBlank(normalized.getCaptureControllerChipId())) {
+            requireCaptureControllerForCurrentStore(normalized.getCaptureControllerChipId());
         }
         Map<String, DeviceDO> targetDevices = new LinkedHashMap<>();
         for (DeviceCamRoiItemVO roi : normalized.getRois()) {
@@ -370,9 +375,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     @Override
     public DeviceCamCaptureTaskRespVO createCaptureTask(DeviceCamCaptureTaskReqVO reqVO) {
         DeviceDO cam = requireCamForCurrentStore(reqVO.getCamChipId());
-        if (!deviceSessionManager.isOnline(cam.getChipId())) {
-            throw new ServiceException("cam 离线，无法创建拍摄任务");
-        }
         String targetChipId = resolveTargetChipId(cam.getChipId(), reqVO.getTargetIndex(), reqVO.getTargetChipId());
         DeviceDO target = requireLampLikeForCurrentStore(targetChipId);
         int targetIndex = resolveCaptureTargetIndex(
@@ -381,6 +383,10 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 target.getChipId()
         );
         DeviceCamRoiConfigVO config = readRoiConfig(cam.getChipId());
+        DeviceDO captureController = requireCaptureControllerForCurrentStore(config);
+        if (!deviceSessionManager.isOnline(captureController.getChipId())) {
+            throw new ServiceException("拍照控制器离线，无法创建拍摄任务");
+        }
         DeviceDO sliderLamp = requireSliderLampForCurrentStore(config);
         if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
             throw new ServiceException("滑轨控制灯离线，无法执行滑轨对位");
@@ -414,7 +420,20 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), task.getTaskId());
             throw e;
         }
+        try {
+            claimCaptureSlot(
+                    activeCaptureTaskByCaptureController,
+                    captureController.getChipId(),
+                    task.getTaskId(),
+                    "拍照控制器已有拍摄任务执行中"
+            );
+        } catch (RuntimeException e) {
+            activeCaptureTaskByCam.remove(cam.getChipId(), task.getTaskId());
+            activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), task.getTaskId());
+            throw e;
+        }
         captureSliderLampByTask.put(task.getTaskId(), sliderLamp.getChipId());
+        captureControllerByTask.put(task.getTaskId(), captureController.getChipId());
         taskCache.put(task.getTaskId(), task);
         String uploadToken = UUID.randomUUID().toString().replace("-", "");
         captureUploadTokens.put(task.getTaskId(), uploadToken);
@@ -422,6 +441,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         PendingCaptureMotion pending = new PendingCaptureMotion(
                 cam.getChipId(),
                 sliderLamp.getChipId(),
+                captureController.getChipId(),
                 target.getChipId(),
                 targetIndex,
                 sliderTargetMm,
@@ -466,10 +486,12 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     private DeviceCamCaptureBatchRespVO createCaptureBatchForCam(DeviceDO cam) {
-        if (!deviceSessionManager.isOnline(cam.getChipId())) {
-            throw new ServiceException("cam 离线，无法创建批量拍摄任务");
-        }
         DeviceCamRoiConfigVO config = readRoiConfig(cam.getChipId());
+        DeviceDO captureController = requireCaptureController(config);
+        requireSameStore(cam, captureController);
+        if (!deviceSessionManager.isOnline(captureController.getChipId())) {
+            throw new ServiceException("拍照控制器离线，无法执行批量拍摄");
+        }
         DeviceDO sliderLamp = requireSliderLamp(config);
         requireSameStore(cam, sliderLamp);
         if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
@@ -499,7 +521,20 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), batchId);
             throw e;
         }
+        try {
+            claimCaptureSlot(
+                    activeCaptureTaskByCaptureController,
+                    captureController.getChipId(),
+                    batchId,
+                    "拍照控制器已有拍摄任务执行中"
+            );
+        } catch (RuntimeException e) {
+            activeCaptureTaskByCam.remove(cam.getChipId(), batchId);
+            activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), batchId);
+            throw e;
+        }
         captureSliderLampByTask.put(batchId, sliderLamp.getChipId());
+        captureControllerByTask.put(batchId, captureController.getChipId());
         batchCache.put(batchId, batch);
 
         try {
@@ -529,6 +564,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                     batch,
                     targets,
                     sliderLamp.getChipId(),
+                    captureController.getChipId(),
                     cam.getStoreId(),
                     config,
                     targetTwo
@@ -703,6 +739,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         PendingCaptureMotion pending = new PendingCaptureMotion(
                 task.getCamChipId(),
                 context.sliderLampChipId(),
+                context.captureControllerChipId(),
                 target.targetChipId(),
                 target.targetIndex(),
                 target.sliderTargetMm(),
@@ -1015,7 +1052,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 "upload_failed",
                 "photo_saved_ai_failed",
                 "camera_offline",
-                "camera_command_failed"
+                "camera_command_failed",
+                "capture_controller_offline",
+                "capture_controller_command_failed"
         );
         boolean failed = Set.of("return_failed", "error", "cancelled")
                 .contains(defaultStatus(batch.getStatus(), ""))
@@ -1161,8 +1200,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         } catch (RuntimeException e) {
             log.warn("slider state completion failed, taskId={}", taskId, e);
         }
-        if (!deviceSessionManager.isOnline(pending.camChipId())) {
-            failCaptureTask(task, "camera_offline", "estimated slider time elapsed but camera is offline", pending.storeId());
+        if (!deviceSessionManager.isOnline(pending.captureControllerChipId())) {
+            failCaptureTask(task, "capture_controller_offline", "estimated slider time elapsed but capture controller is offline", pending.storeId());
             return;
         }
 
@@ -1170,6 +1209,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         capture.put("type", "cameraCapture");
         capture.put("taskId", taskId);
         capture.put("camChipId", pending.camChipId());
+        capture.put("captureControllerChipId", pending.captureControllerChipId());
         capture.put("targetChipId", pending.targetChipId());
         capture.put("targetIndex", pending.targetIndex());
         capture.put("motionReady", true);
@@ -1177,14 +1217,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         capture.put("uploadToken", pending.uploadToken());
         boolean captureSent;
         try {
-            captureSent = deviceSessionManager.sendToDevice(pending.camChipId(), capture.toString());
+            captureSent = deviceSessionManager.sendToDevice(pending.captureControllerChipId(), capture.toString());
         } catch (RuntimeException e) {
-            log.warn("camera capture command send failed, taskId={}", taskId, e);
-            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
+            log.warn("capture controller command send failed, taskId={}", taskId, e);
+            failCaptureTask(task, "capture_controller_command_failed", "capture controller command send failed", pending.storeId());
             return;
         }
         if (!captureSent) {
-            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
+            failCaptureTask(task, "capture_controller_command_failed", "capture controller command send failed", pending.storeId());
             return;
         }
 
@@ -1326,6 +1366,10 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         String sliderLampChipId = captureSliderLampByTask.remove(operationId);
         if (notBlank(sliderLampChipId)) {
             activeCaptureTaskBySliderLamp.remove(sliderLampChipId, operationId);
+        }
+        String captureControllerChipId = captureControllerByTask.remove(operationId);
+        if (notBlank(captureControllerChipId)) {
+            activeCaptureTaskByCaptureController.remove(captureControllerChipId, operationId);
         }
         activeCaptureTaskByCam.remove(camChipId, operationId);
         if (notBlank(camChipId)) {
@@ -2204,6 +2248,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private record PendingCaptureMotion(
             String camChipId,
             String sliderLampChipId,
+            String captureControllerChipId,
             String targetChipId,
             int targetIndex,
             double sliderTargetMm,
@@ -2243,6 +2288,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         private final DeviceCamCaptureBatchRespVO batch;
         private final List<BatchCaptureTarget> targets;
         private final String sliderLampChipId;
+        private final String captureControllerChipId;
         private final Long storeId;
         private final DeviceCamRoiConfigVO config;
         private final BatchCaptureTarget targetTwo;
@@ -2252,12 +2298,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 DeviceCamCaptureBatchRespVO batch,
                 List<BatchCaptureTarget> targets,
                 String sliderLampChipId,
+                String captureControllerChipId,
                 Long storeId,
                 DeviceCamRoiConfigVO config,
                 BatchCaptureTarget targetTwo) {
             this.batch = batch;
             this.targets = targets;
             this.sliderLampChipId = sliderLampChipId;
+            this.captureControllerChipId = captureControllerChipId;
             this.storeId = storeId;
             this.config = config;
             this.targetTwo = targetTwo;
@@ -2273,6 +2321,10 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
         private String sliderLampChipId() {
             return sliderLampChipId;
+        }
+
+        private String captureControllerChipId() {
+            return captureControllerChipId;
         }
 
         private Long storeId() {
@@ -2366,6 +2418,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         value.setCamChipId(camChipId);
         value.setSliderLampChipId(notBlank(value.getSliderLampChipId())
                 ? value.getSliderLampChipId().trim()
+                : null);
+        value.setCaptureControllerChipId(notBlank(value.getCaptureControllerChipId())
+                ? value.getCaptureControllerChipId().trim()
                 : null);
         if (value.getRois() == null) {
             value.setRois(new java.util.ArrayList<>());
@@ -2586,6 +2641,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return device;
     }
 
+    private DeviceDO requireCaptureControllerForCurrentStore(String chipId) {
+        DeviceDO device = requireDeviceForCurrentStore(chipId);
+        if (!DeviceTypeUtil.isCaptureController(device.getDeviceType())) {
+            throw new ServiceException("拍照控制器必须是 cam_capture 设备");
+        }
+        return device;
+    }
+
     private DeviceDO requireDeviceForCurrentStore(String chipId) {
         DeviceDO device = requireDevice(chipId);
         Long storeId = currentStoreService.getCurrentStoreId();
@@ -2609,6 +2672,28 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             throw new ServiceException("设备不是 lamp/camlamp");
         }
         return device;
+    }
+
+    private DeviceDO requireCaptureController(String chipId) {
+        DeviceDO device = requireDevice(chipId);
+        if (!DeviceTypeUtil.isCaptureController(device.getDeviceType())) {
+            throw new ServiceException("设备不是 cam_capture");
+        }
+        return device;
+    }
+
+    private DeviceDO requireCaptureControllerForCurrentStore(DeviceCamRoiConfigVO config) {
+        if (config == null || !notBlank(config.getCaptureControllerChipId())) {
+            throw new ServiceException("拍照控制器未绑定，请先在 Camera 详情中选择 cam_capture 设备");
+        }
+        return requireCaptureControllerForCurrentStore(config.getCaptureControllerChipId());
+    }
+
+    private DeviceDO requireCaptureController(DeviceCamRoiConfigVO config) {
+        if (config == null || !notBlank(config.getCaptureControllerChipId())) {
+            throw new ServiceException("拍照控制器未绑定，请先在 Camera 详情中选择 cam_capture 设备");
+        }
+        return requireCaptureController(config.getCaptureControllerChipId());
     }
 
     private void requireSameStore(DeviceDO expectedStoreDevice, DeviceDO candidate) {

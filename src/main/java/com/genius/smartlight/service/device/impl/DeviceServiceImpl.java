@@ -222,7 +222,7 @@ public class DeviceServiceImpl implements DeviceService {
         DeviceRespVO respVO = toResp(currentDevice);
 
         webSocketPushService.pushState(respVO);
-        if (!DeviceTypeUtil.isCam(respVO.getDeviceType())) {
+        if (DeviceTypeUtil.isLampLike(respVO.getDeviceType())) {
             webSocketPushService.pushStateToDevice(currentDevice.getChipId(), respVO);
         }
         log.info("Device updated, id={}, chipId={}, storeId={}, lightControl={}",
@@ -428,7 +428,7 @@ public class DeviceServiceImpl implements DeviceService {
         String type = DeviceTypeUtil.normalize(device.getDeviceType());
         device.setDeviceType(type);
 
-        if (!DeviceTypeUtil.isCam(type)) {
+        if (DeviceTypeUtil.isLampLike(type)) {
             if (device.getGarmentAimEnabled() == null) {
                 device.setGarmentAimEnabled(false);
             }

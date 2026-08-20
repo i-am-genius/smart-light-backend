@@ -19,7 +19,7 @@ public class DeviceRespVO {
     @Schema(description = "芯片唯一ID，设备控制和状态同步的匹配主键", example = "ABC123456")
     private String chipId;
 
-    @Schema(description = "设备类型：lamp 普通灯控设备，cam 独立摄像头云台设备，camlamp 带摄像头/云台的灯控设备", example = "lamp", allowableValues = {"lamp", "cam", "camlamp"})
+    @Schema(description = "设备类型：lamp 普通灯控设备，cam 跟踪摄像头设备，camlamp 旧摄像头灯设备，cam_capture 专用拍照控制器", example = "lamp", allowableValues = {"lamp", "cam", "camlamp", "cam_capture"})
     private String deviceType;
 
     @Schema(description = "店内编号", example = "1")

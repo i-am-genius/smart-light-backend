@@ -392,7 +392,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
         }
 
         DeviceRespVO stateVO = DeviceConvert.convert(device);
-        if (!DeviceTypeUtil.isCam(stateVO.getDeviceType())) {
+        if (DeviceTypeUtil.isLampLike(stateVO.getDeviceType())) {
             webSocketPushService.pushStateToDevice(chipId, stateVO);
         }
     }

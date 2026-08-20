@@ -67,6 +67,7 @@ class DeviceCamServiceImplTest {
     private static final String MANUAL_CAM_CHIP_ID = "CAM-MANUAL-TRACKING-TEST";
     private static final String MANUAL_LAMP_CHIP_ID = "LAMP-MANUAL-TRACKING-TEST";
     private static final String SLIDER_LAMP_CHIP_ID = "LAMP-SLIDER-TEST";
+    private static final String CAPTURE_CONTROLLER_CHIP_ID = "CAM-CAPTURE-TEST";
 
     private DeviceMapper deviceMapper;
     private CurrentStoreService currentStoreService;
@@ -106,14 +107,17 @@ class DeviceCamServiceImplTest {
         DeviceDO cam = device("CAM-001", "cam");
         DeviceDO lamp = device("LAMP-001", "lamp");
         DeviceDO sliderLamp = device(SLIDER_LAMP_CHIP_ID, "lamp");
-        stubDevices(cam, lamp, sliderLamp);
+        DeviceDO captureController = device(CAPTURE_CONTROLLER_CHIP_ID, "cam_capture");
+        stubDevices(cam, lamp, sliderLamp, captureController);
         when(currentStoreService.getCurrentStoreId()).thenReturn(1L);
         when(deviceSessionManager.isOnline("CAM-001")).thenReturn(true);
         when(deviceSessionManager.isOnline("LAMP-001")).thenReturn(true);
         when(deviceSessionManager.isOnline(SLIDER_LAMP_CHIP_ID)).thenReturn(true);
+        when(deviceSessionManager.isOnline(CAPTURE_CONTROLLER_CHIP_ID)).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq("CAM-001"), any(String.class))).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq("LAMP-001"), any(String.class))).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class))).thenReturn(true);
+        when(deviceSessionManager.sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), any(String.class))).thenReturn(true);
         when(sliderMotionStateService.getSnapshot(any(String.class), any()))
                 .thenReturn(new SliderMotionStateService.SliderStateSnapshot(
                         0D, 0D, "normal", null, null
@@ -297,6 +301,58 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
+    void createCaptureTask_allowsOfflineTrackingCameraWhenCaptureControllerIsOnline() {
+        when(deviceSessionManager.isOnline("CAM-001")).thenReturn(false);
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+
+        assertThat(task.getStatus()).isEqualTo("waiting_motion");
+        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
+    }
+
+    @Test
+    void createCaptureTask_rejectsOfflineCaptureControllerBeforeMovingSlider() {
+        when(deviceSessionManager.isOnline(CAPTURE_CONTROLLER_CHIP_ID)).thenReturn(false);
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+
+        assertThatThrownBy(() -> service.createCaptureTask(request))
+                .hasMessageContaining("拍照控制器离线");
+        verify(deviceSessionManager, never()).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
+    }
+
+    @Test
+    void createCaptureTask_rejectsMissingCaptureControllerBindingBeforeMovingSlider() throws Exception {
+        DeviceCamRoiConfigVO config = objectMapper.readValue(defaultConfigPath().toFile(), DeviceCamRoiConfigVO.class);
+        config.setCaptureControllerChipId(null);
+        objectMapper.writeValue(defaultConfigPath().toFile(), config);
+
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+
+        assertThatThrownBy(() -> service.createCaptureTask(request))
+                .hasMessageContaining("拍照控制器未绑定");
+        verify(deviceSessionManager, never()).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
+    }
+
+    @Test
+    void saveRoiConfig_rejectsNonCaptureControllerBinding() throws Exception {
+        DeviceCamRoiConfigVO config = objectMapper.readValue(defaultConfigPath().toFile(), DeviceCamRoiConfigVO.class);
+        config.setCaptureControllerChipId("LAMP-001");
+
+        assertThatThrownBy(() -> service.saveRoiConfig("CAM-001", config))
+                .hasMessageContaining("cam_capture");
+    }
+
+    @Test
     void roiContract_usesSingleSliderPresetAndOmitsCameraPosePresets() throws Exception {
         DeviceCamRoiItemVO roi = new DeviceCamRoiItemVO();
         roi.setTargetIndex(1);
@@ -310,6 +366,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
+        config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
         config.setRois(List.of(roi));
         config.setSliderPresets(Map.of("1", 320.0));
 
@@ -318,6 +375,7 @@ class DeviceCamServiceImplTest {
 
         assertThat(json).contains(
                 "\"sliderLampChipId\":\"" + SLIDER_LAMP_CHIP_ID + "\"",
+                "\"captureControllerChipId\":\"" + CAPTURE_CONTROLLER_CHIP_ID + "\"",
                 "\"sliderPresets\":{\"1\":320.0}"
         );
         assertThat(json).doesNotContain(
@@ -381,7 +439,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void estimatedMoveTime_sendsBackwardCompatibleCameraCaptureExactlyOnce() throws Exception {
+    void estimatedMoveTime_sendsCameraCaptureToBoundCaptureControllerExactlyOnce() throws Exception {
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId("CAM-001");
         request.setTargetChipId("LAMP-001");
@@ -394,10 +452,12 @@ class DeviceCamServiceImplTest {
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(deviceSessionManager, timeout(1500).times(1))
-                .sendToDevice(eq("CAM-001"), payloadCaptor.capture());
+                .sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), payloadCaptor.capture());
         JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
         assertThat(payload.path("type").asText()).isEqualTo("cameraCapture");
         assertThat(payload.path("taskId").asText()).isEqualTo(task.getTaskId());
+        assertThat(payload.path("camChipId").asText()).isEqualTo("CAM-001");
+        assertThat(payload.path("captureControllerChipId").asText()).isEqualTo(CAPTURE_CONTROLLER_CHIP_ID);
         assertThat(payload.path("motionReady").asBoolean()).isTrue();
         assertThat(payload.has("capturePreset")).isFalse();
         assertThat(task.getStatus()).isEqualTo("capturing");
@@ -587,7 +647,8 @@ class DeviceCamServiceImplTest {
         assertThat(returnMotion.path("source").asText()).isEqualTo("camera_batch_return");
         assertThat(returnMotion.path("taskId").asText()).isEqualTo(batch.getBatchId());
         assertThat(returnMotion.path("slider").asDouble()).isEqualTo(640.0);
-        verify(deviceSessionManager, times(3)).sendToDevice(eq("CAM-001"), any());
+        verify(deviceSessionManager, times(3)).sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), any());
+        verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-001"), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-002"), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-003"), any());
@@ -674,12 +735,15 @@ class DeviceCamServiceImplTest {
     private void configureManualTrackingDevices(boolean camOnline, boolean lampOnline, String lampIp) {
         DeviceDO cam = device(MANUAL_CAM_CHIP_ID, "cam");
         DeviceDO lamp = device(MANUAL_LAMP_CHIP_ID, "lamp");
+        DeviceDO captureController = device(CAPTURE_CONTROLLER_CHIP_ID, "cam_capture");
         lamp.setIp(lampIp);
-        stubDevices(cam, lamp);
+        stubDevices(cam, lamp, captureController);
         when(deviceSessionManager.isOnline(MANUAL_CAM_CHIP_ID)).thenReturn(camOnline);
         when(deviceSessionManager.isOnline(MANUAL_LAMP_CHIP_ID)).thenReturn(lampOnline);
+        when(deviceSessionManager.isOnline(CAPTURE_CONTROLLER_CHIP_ID)).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq(MANUAL_CAM_CHIP_ID), any(String.class))).thenReturn(true);
         when(deviceSessionManager.sendToDevice(eq(MANUAL_LAMP_CHIP_ID), any(String.class))).thenReturn(true);
+        when(deviceSessionManager.sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), any(String.class))).thenReturn(true);
     }
 
     private DeviceCamTrackingControlReqVO manualTrackingRequest(int targetIndex) {
@@ -703,6 +767,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
         config.setSliderLampChipId(MANUAL_LAMP_CHIP_ID);
+        config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
         config.setConfigured(true);
         config.setRois(List.of(roi));
         config.setSliderPresets(Map.of("1", 600.0));
@@ -721,6 +786,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
         config.setSliderLampChipId(MANUAL_LAMP_CHIP_ID);
+        config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
         config.setRois(List.of(target));
         config.setSliderPresets(Map.of(String.valueOf(targetIndex), 600.0));
         config.setSliderMoveTimes(moveTimes(targetIndex));
@@ -762,6 +828,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
+        config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
         config.setRois(List.of(target));
         config.setSliderPresets(Map.of("1", 320.0));
         config.setSliderMoveTimes(moveTimes(1));
@@ -788,6 +855,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
+        config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
         config.setConfigured(true);
         config.setRois(List.of(target1, target2, target3));
         config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));
@@ -803,7 +871,8 @@ class DeviceCamServiceImplTest {
                 device("LAMP-001", "lamp"),
                 device("LAMP-002", "lamp"),
                 device("LAMP-003", "lamp"),
-                device(SLIDER_LAMP_CHIP_ID, "lamp")
+                device(SLIDER_LAMP_CHIP_ID, "lamp"),
+                device(CAPTURE_CONTROLLER_CHIP_ID, "cam_capture")
         );
     }
 
@@ -821,7 +890,7 @@ class DeviceCamServiceImplTest {
 
     private void awaitCameraCapture(String taskId) {
         verify(deviceSessionManager, timeout(1500).times(1)).sendToDevice(
-                eq("CAM-001"),
+                eq(CAPTURE_CONTROLLER_CHIP_ID),
                 argThat(payload -> payload.contains("\"type\":\"cameraCapture\"")
                         && payload.contains("\"taskId\":\"" + taskId + "\""))
         );

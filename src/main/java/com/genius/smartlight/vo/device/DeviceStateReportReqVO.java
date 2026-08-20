@@ -14,7 +14,7 @@ public class DeviceStateReportReqVO {
     @NotBlank(message = "芯片ID不能为空")
     private String chipId;
 
-    @Schema(description = "设备类型：lamp、cam 或 camlamp", example = "lamp", allowableValues = {"lamp", "cam", "camlamp"}, requiredMode = Schema.RequiredMode.REQUIRED)
+    @Schema(description = "设备类型：lamp、cam、camlamp 或 cam_capture", example = "lamp", allowableValues = {"lamp", "cam", "camlamp", "cam_capture"}, requiredMode = Schema.RequiredMode.REQUIRED)
     @NotBlank(message = "设备类型不能为空")
     private String deviceType;
 

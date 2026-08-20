@@ -13,11 +13,13 @@ import java.util.Map;
 
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
-@Schema(description = "cam ROI、滑轨控制灯与滑轨预设配置")
+@Schema(description = "cam ROI、滑轨控制灯、拍照控制器与滑轨预设配置")
 public class DeviceCamRoiConfigVO {
     private String camChipId;
     @Schema(description = "实际连接 Nano 滑轨电机的 Lamp chipId")
     private String sliderLampChipId;
+    @Schema(description = "负责舵机控制并向 ESP32 转发拍照任务的 cam_capture chipId")
+    private String captureControllerChipId;
     private List<DeviceCamRoiItemVO> rois = new ArrayList<>();
     @Schema(description = "每个 ROI 的唯一滑轨位置，单位 mm")
     private Map<String, Double> sliderPresets = new LinkedHashMap<>();

@@ -150,6 +150,36 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     @Override
+    public void pushCaptureControllerConfigForDevice(String captureControllerChipId) {
+        if (!notBlank(captureControllerChipId) || !Files.isDirectory(CAM_CONFIG_DIR)) {
+            return;
+        }
+        try (var paths = Files.list(CAM_CONFIG_DIR)) {
+            for (Path path : paths.filter(Files::isRegularFile).sorted().toList()) {
+                try {
+                    DeviceCamRoiConfigVO saved = objectMapper.readValue(
+                            path.toFile(),
+                            DeviceCamRoiConfigVO.class
+                    );
+                    if (!notBlank(saved.getCamChipId())) {
+                        continue;
+                    }
+                    DeviceCamRoiConfigVO normalized = normalizeConfig(saved.getCamChipId(), saved);
+                    if (sameChipId(normalized.getCaptureControllerChipId(), captureControllerChipId)) {
+                        pushCaptureControllerConfig(normalized);
+                        return;
+                    }
+                } catch (IOException | RuntimeException e) {
+                    log.warn("read capture controller binding config failed, path={}", path, e);
+                }
+            }
+        } catch (IOException e) {
+            log.warn("scan capture controller binding config failed, captureControllerChipId={}",
+                    captureControllerChipId, e);
+        }
+    }
+
+    @Override
     public DeviceCamRoiConfigVO saveRoiConfig(String camChipId, DeviceCamRoiConfigVO config) {
         DeviceDO cam = requireCamForCurrentStore(camChipId);
         DeviceCamRoiConfigVO normalized = normalizeConfig(cam.getChipId(), config);
@@ -168,6 +198,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
         writeRoiConfig(normalized);
         pushRoiConfigToCam(cam.getChipId(), normalized);
+        pushCaptureControllerConfig(normalized);
         pushLampIpsToCamByHttp(cam, normalized, targetDevices);
         webSocketPushService.pushCamStatus(Map.of(
                 "camChipId", cam.getChipId(),
@@ -186,6 +217,42 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             }
         } catch (Exception e) {
             log.warn("push cam roi config failed, camChipId={}", camChipId, e);
+        }
+    }
+
+    private void pushCaptureControllerConfig(DeviceCamRoiConfigVO config) {
+        if (config == null || !notBlank(config.getCaptureControllerChipId())) {
+            return;
+        }
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("type", "captureControllerConfig");
+        payload.put("camChipId", config.getCamChipId());
+        payload.put("captureControllerChipId", config.getCaptureControllerChipId());
+        payload.put("flowUploadEnabled", Boolean.TRUE.equals(config.getFlowUploadEnabled()));
+        payload.put("flowUploadIntervalSeconds", config.getFlowUploadIntervalSeconds());
+        ObjectNode garmentPreset = payload.putObject("garmentCapturePreset");
+        garmentPreset.put("pan", config.getGarmentCapturePan());
+        garmentPreset.put("tilt", config.getGarmentCaptureTilt());
+        ObjectNode personPreset = payload.putObject("personCapturePreset");
+        personPreset.put("pan", config.getPersonCapturePan());
+        personPreset.put("tilt", config.getPersonCaptureTilt());
+        payload.put(
+                "flowUploadUrl",
+                "/device/cam/flow-photo?camChipId=" + config.getCamChipId()
+                        + "&captureControllerChipId=" + config.getCaptureControllerChipId()
+        );
+        try {
+            boolean sent = deviceSessionManager.sendToDevice(
+                    config.getCaptureControllerChipId(),
+                    payload.toString()
+            );
+            if (!sent) {
+                log.warn("push capture controller config skipped or failed, captureControllerChipId={}",
+                        config.getCaptureControllerChipId());
+            }
+        } catch (RuntimeException e) {
+            log.warn("push capture controller config failed, captureControllerChipId={}",
+                    config.getCaptureControllerChipId(), e);
         }
     }
 
@@ -442,8 +509,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 cam.getChipId(),
                 sliderLamp.getChipId(),
                 captureController.getChipId(),
-                config.getCapturePan(),
-                config.getCaptureTilt(),
+                config.getGarmentCapturePan(),
+                config.getGarmentCaptureTilt(),
                 target.getChipId(),
                 targetIndex,
                 sliderTargetMm,
@@ -742,8 +809,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 task.getCamChipId(),
                 context.sliderLampChipId(),
                 context.captureControllerChipId(),
-                context.config().getCapturePan(),
-                context.config().getCaptureTilt(),
+                context.config().getGarmentCapturePan(),
+                context.config().getGarmentCaptureTilt(),
                 target.targetChipId(),
                 target.targetIndex(),
                 target.sliderTargetMm(),
@@ -1109,6 +1176,10 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     @Override
     public void uploadFlowPhoto(String camChipId, Integer personCount, Double confidence, String detectTime, MultipartFile file) {
         DeviceDO cam = requireCam(camChipId);
+        if (personCount == null) {
+            aiService.personDetect(cam.getChipId(), file);
+            return;
+        }
         String imageName = saveUpload(file, "flow", cam.getChipId());
         saveFlowRecordIfNeeded(cam, personCount, confidence, detectTime, imageName);
     }
@@ -1137,11 +1208,34 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     @Override
-    public void uploadFlowPhotoByDevice(String camChipId, String token, Integer personCount, Double confidence, String detectTime, MultipartFile file) {
-        if (!deviceSessionManager.validateUploadToken(camChipId, token)) {
+    public void uploadFlowPhotoByDevice(
+            String camChipId,
+            String captureControllerChipId,
+            String token,
+            Integer personCount,
+            Double confidence,
+            String detectTime,
+            MultipartFile file) {
+        String tokenOwnerChipId = notBlank(captureControllerChipId)
+                ? captureControllerChipId.trim()
+                : camChipId;
+        if (!deviceSessionManager.validateUploadToken(tokenOwnerChipId, token)) {
             throw new ServiceException("cam flow upload token invalid");
         }
+        if (notBlank(captureControllerChipId)) {
+            requireBoundCaptureController(camChipId, captureControllerChipId);
+        }
         uploadFlowPhoto(camChipId, personCount, confidence, detectTime, file);
+    }
+
+    private void requireBoundCaptureController(String camChipId, String captureControllerChipId) {
+        DeviceDO cam = requireCam(camChipId);
+        DeviceDO captureController = requireCaptureController(captureControllerChipId);
+        requireSameStore(cam, captureController);
+        DeviceCamRoiConfigVO config = readRoiConfig(cam.getChipId());
+        if (!sameChipId(config.getCaptureControllerChipId(), captureController.getChipId())) {
+            throw new ServiceException("拍照控制器未绑定到指定 cam");
+        }
     }
 
     @Override
@@ -1216,6 +1310,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         capture.put("captureControllerChipId", pending.captureControllerChipId());
         capture.put("targetChipId", pending.targetChipId());
         capture.put("targetIndex", pending.targetIndex());
+        capture.put("captureKind", "garment");
         capture.put("motionReady", true);
         capture.put("uploadUrl", "/device/cam/capture-task/" + taskId + "/photo");
         capture.put("uploadToken", pending.uploadToken());
@@ -2431,8 +2526,23 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         value.setCaptureControllerChipId(notBlank(value.getCaptureControllerChipId())
                 ? value.getCaptureControllerChipId().trim()
                 : null);
-        value.setCapturePan(clampDouble(value.getCapturePan(), 0D, 180D, 90D));
-        value.setCaptureTilt(clampDouble(value.getCaptureTilt(), 0D, 180D, 90D));
+        Double legacyCapturePan = value.getCapturePan();
+        Double legacyCaptureTilt = value.getCaptureTilt();
+        value.setGarmentCapturePan(clampDouble(
+                value.getGarmentCapturePan() != null ? value.getGarmentCapturePan() : legacyCapturePan,
+                0D, 180D, 90D
+        ));
+        value.setGarmentCaptureTilt(clampDouble(
+                value.getGarmentCaptureTilt() != null ? value.getGarmentCaptureTilt() : legacyCaptureTilt,
+                0D, 180D, 90D
+        ));
+        value.setPersonCapturePan(clampDouble(value.getPersonCapturePan(), 0D, 180D, 90D));
+        value.setPersonCaptureTilt(clampDouble(value.getPersonCaptureTilt(), 0D, 180D, 90D));
+        value.setFlowUploadEnabled(Boolean.TRUE.equals(value.getFlowUploadEnabled()));
+        int flowUploadIntervalSeconds = value.getFlowUploadIntervalSeconds() == null
+                ? 30
+                : value.getFlowUploadIntervalSeconds();
+        value.setFlowUploadIntervalSeconds(Math.max(5, Math.min(3600, flowUploadIntervalSeconds)));
         if (value.getRois() == null) {
             value.setRois(new java.util.ArrayList<>());
         }

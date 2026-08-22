@@ -353,7 +353,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void roiContract_usesSharedCapturePoseAndSingleSliderPreset() throws Exception {
+    void roiContract_usesSeparateGarmentAndPersonCapturePoses() throws Exception {
         DeviceCamRoiItemVO roi = new DeviceCamRoiItemVO();
         roi.setTargetIndex(1);
         roi.setTargetChipId("LAMP-001");
@@ -367,19 +367,28 @@ class DeviceCamServiceImplTest {
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
-        config.setCapturePan(-12D);
-        config.setCaptureTilt(240D);
+        config.setGarmentCapturePan(-12D);
+        config.setGarmentCaptureTilt(240D);
+        config.setPersonCapturePan(35D);
+        config.setPersonCaptureTilt(145D);
+        config.setFlowUploadEnabled(true);
+        config.setFlowUploadIntervalSeconds(45);
         config.setRois(List.of(roi));
         config.setSliderPresets(Map.of("1", 320.0));
 
         ObjectMapper mapper = new ObjectMapper();
-        String json = mapper.writeValueAsString(config);
+        DeviceCamRoiConfigVO normalized = service.normalizeConfig("CAM-001", config);
+        String json = mapper.writeValueAsString(normalized);
 
         assertThat(json).contains(
                 "\"sliderLampChipId\":\"" + SLIDER_LAMP_CHIP_ID + "\"",
                 "\"captureControllerChipId\":\"" + CAPTURE_CONTROLLER_CHIP_ID + "\"",
-                "\"capturePan\":0.0",
-                "\"captureTilt\":180.0",
+                "\"garmentCapturePan\":0.0",
+                "\"garmentCaptureTilt\":180.0",
+                "\"personCapturePan\":35.0",
+                "\"personCaptureTilt\":145.0",
+                "\"flowUploadEnabled\":true",
+                "\"flowUploadIntervalSeconds\":45",
                 "\"sliderPresets\":{\"1\":320.0}"
         );
         assertThat(json).doesNotContain(
@@ -388,6 +397,25 @@ class DeviceCamServiceImplTest {
                 "dwellSeconds", "leaveDelaySeconds", "confidenceThreshold", "udpIp", "udpPort"
         );
         assertThat(mapper.readTree(json).path("sliderPresets").path("1").asDouble()).isEqualTo(320.0);
+    }
+
+    @Test
+    void captureControllerReconnect_receivesPersistedBindingAndFlowConfig() throws Exception {
+        service.pushCaptureControllerConfigForDevice(CAPTURE_CONTROLLER_CHIP_ID);
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager).sendToDevice(
+                eq(CAPTURE_CONTROLLER_CHIP_ID),
+                payloadCaptor.capture()
+        );
+        JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
+        assertThat(payload.path("type").asText()).isEqualTo("captureControllerConfig");
+        assertThat(payload.path("camChipId").asText()).isEqualTo("CAM-001");
+        assertThat(payload.path("garmentCapturePreset").path("pan").asDouble()).isEqualTo(120D);
+        assertThat(payload.path("personCapturePreset").path("pan").asDouble()).isEqualTo(90D);
+        assertThat(payload.path("flowUploadIntervalSeconds").asInt()).isEqualTo(30);
+        assertThat(payload.path("flowUploadUrl").asText())
+                .contains("captureControllerChipId=" + CAPTURE_CONTROLLER_CHIP_ID);
     }
 
     @Test
@@ -414,8 +442,12 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO normalized = service.normalizeConfig("CAM-001", legacy);
         String json = mapper.writeValueAsString(normalized);
 
-        assertThat(normalized.getCapturePan()).isEqualTo(90.0);
-        assertThat(normalized.getCaptureTilt()).isEqualTo(90.0);
+        assertThat(normalized.getGarmentCapturePan()).isEqualTo(90.0);
+        assertThat(normalized.getGarmentCaptureTilt()).isEqualTo(90.0);
+        assertThat(normalized.getPersonCapturePan()).isEqualTo(90.0);
+        assertThat(normalized.getPersonCaptureTilt()).isEqualTo(90.0);
+        assertThat(normalized.getFlowUploadEnabled()).isFalse();
+        assertThat(normalized.getFlowUploadIntervalSeconds()).isEqualTo(30);
         assertThat(normalized.getSliderPresets().get("1")).isEqualTo(0.0);
         assertThat(json).doesNotContain(
                 "capturePresets", "trackingPresets", "pan", "tilt", "yaw", "pitch", "roll",
@@ -467,7 +499,58 @@ class DeviceCamServiceImplTest {
         assertThat(payload.path("motionReady").asBoolean()).isTrue();
         assertThat(payload.path("capturePreset").path("pan").asDouble()).isEqualTo(120D);
         assertThat(payload.path("capturePreset").path("tilt").asDouble()).isEqualTo(72D);
+        assertThat(payload.path("captureKind").asText()).isEqualTo("garment");
         assertThat(task.getStatus()).isEqualTo("capturing");
+    }
+
+    @Test
+    void flowPhotoUpload_acceptsBoundCaptureControllerTokenAndRunsServerDetection() {
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "flow.jpg", "image/jpeg", new byte[]{1, 2, 3}
+        );
+        when(deviceSessionManager.validateUploadToken(CAPTURE_CONTROLLER_CHIP_ID, "flow-token"))
+                .thenReturn(true);
+
+        service.uploadFlowPhotoByDevice(
+                "CAM-001",
+                CAPTURE_CONTROLLER_CHIP_ID,
+                "flow-token",
+                null,
+                null,
+                null,
+                file
+        );
+
+        verify(aiService).personDetect("CAM-001", file);
+    }
+
+    @Test
+    void flowPhotoUpload_rejectsControllerThatIsNotBoundToLogicalCam() {
+        DeviceDO otherController = device("CAM-CAPTURE-OTHER", "cam_capture");
+        stubDevices(
+                device("CAM-001", "cam"),
+                device("LAMP-001", "lamp"),
+                device(SLIDER_LAMP_CHIP_ID, "lamp"),
+                device(CAPTURE_CONTROLLER_CHIP_ID, "cam_capture"),
+                otherController
+        );
+        when(deviceSessionManager.validateUploadToken("CAM-CAPTURE-OTHER", "flow-token"))
+                .thenReturn(true);
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "flow.jpg", "image/jpeg", new byte[]{1, 2, 3}
+        );
+
+        assertThatThrownBy(() -> service.uploadFlowPhotoByDevice(
+                "CAM-001",
+                "CAM-CAPTURE-OTHER",
+                "flow-token",
+                null,
+                null,
+                null,
+                file
+        )).hasMessageContaining("未绑定");
+
+        verify(aiService, never()).personDetect(any(), any());
     }
 
     @Test
@@ -836,8 +919,12 @@ class DeviceCamServiceImplTest {
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
-        config.setCapturePan(120D);
-        config.setCaptureTilt(72D);
+        config.setGarmentCapturePan(120D);
+        config.setGarmentCaptureTilt(72D);
+        config.setPersonCapturePan(90D);
+        config.setPersonCaptureTilt(90D);
+        config.setFlowUploadEnabled(false);
+        config.setFlowUploadIntervalSeconds(30);
         config.setRois(List.of(target));
         config.setSliderPresets(Map.of("1", 320.0));
         config.setSliderMoveTimes(moveTimes(1));
@@ -865,8 +952,12 @@ class DeviceCamServiceImplTest {
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
-        config.setCapturePan(120D);
-        config.setCaptureTilt(72D);
+        config.setGarmentCapturePan(120D);
+        config.setGarmentCaptureTilt(72D);
+        config.setPersonCapturePan(90D);
+        config.setPersonCaptureTilt(90D);
+        config.setFlowUploadEnabled(false);
+        config.setFlowUploadIntervalSeconds(30);
         config.setConfigured(true);
         config.setRois(List.of(target1, target2, target3));
         config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));

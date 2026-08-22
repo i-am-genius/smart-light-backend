@@ -36,12 +36,21 @@ public class DeviceCamUploadController {
     @PostMapping(value = "/flow-photo", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public CommonResult<Boolean> uploadFlowPhoto(
             @RequestParam String camChipId,
+            @RequestParam(required = false) String captureControllerChipId,
             @RequestParam String token,
             @RequestParam(required = false) Integer personCount,
             @RequestParam(required = false) Double confidence,
             @RequestParam(required = false) String detectTime,
             @RequestPart("file") MultipartFile file) {
-        deviceCamService.uploadFlowPhotoByDevice(camChipId, token, personCount, confidence, detectTime, file);
+        deviceCamService.uploadFlowPhotoByDevice(
+                camChipId,
+                captureControllerChipId,
+                token,
+                personCount,
+                confidence,
+                detectTime,
+                file
+        );
         return CommonResult.success(true);
     }
 }

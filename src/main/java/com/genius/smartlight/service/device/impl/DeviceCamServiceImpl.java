@@ -1460,18 +1460,59 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         ObjectNode capturePreset = capture.putObject("capturePreset");
         capturePreset.put("pan", pending.capturePan());
         capturePreset.put("tilt", pending.captureTilt());
+
+        log.info(
+                "sending camera capture command, taskId={}, batchId={}, camChipId={}, "
+                        + "captureControllerChipId={}, targetChipId={}, targetIndex={}, "
+                        + "captureKind=garment, pan={}, tilt={}",
+                taskId,
+                task.getBatchId(),
+                pending.camChipId(),
+                pending.captureControllerChipId(),
+                pending.targetChipId(),
+                pending.targetIndex(),
+                pending.capturePan(),
+                pending.captureTilt()
+        );
         boolean captureSent;
         try {
             captureSent = deviceSessionManager.sendToDevice(pending.captureControllerChipId(), capture.toString());
         } catch (RuntimeException e) {
-            log.warn("capture controller command send failed, taskId={}", taskId, e);
+            log.warn(
+                    "camera capture command send threw exception, taskId={}, captureControllerChipId={}, "
+                            + "targetIndex={}, pan={}, tilt={}",
+                    taskId,
+                    pending.captureControllerChipId(),
+                    pending.targetIndex(),
+                    pending.capturePan(),
+                    pending.captureTilt(),
+                    e
+            );
             failCaptureTask(task, "capture_controller_command_failed", "capture controller command send failed", pending.storeId());
             return;
         }
         if (!captureSent) {
+            log.warn(
+                    "camera capture command not delivered, taskId={}, captureControllerChipId={}, "
+                            + "targetIndex={}, pan={}, tilt={}",
+                    taskId,
+                    pending.captureControllerChipId(),
+                    pending.targetIndex(),
+                    pending.capturePan(),
+                    pending.captureTilt()
+            );
             failCaptureTask(task, "capture_controller_command_failed", "capture controller command send failed", pending.storeId());
             return;
         }
+        log.info(
+                "camera capture command sent, taskId={}, captureControllerChipId={}, "
+                        + "targetIndex={}, pan={}, tilt={}",
+                taskId,
+                pending.captureControllerChipId(),
+                pending.targetIndex(),
+                pending.capturePan(),
+                pending.captureTilt()
+        );
 
         task.setStatus("capturing");
         task.setMessage("estimated slider time elapsed; capture command sent");

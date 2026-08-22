@@ -64,4 +64,38 @@ class DeviceCamControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.trackingStatus").value("stopped"));
     }
+
+    @Test
+    void globalTrackingStart_delegatesToFixedTrackingService() throws Exception {
+        DeviceTrackingStatusRespVO response = new DeviceTrackingStatusRespVO();
+        response.setTrackingStatus("armed");
+        response.setTrackingMode("global");
+        when(fixedPersonTrackingService.startGlobal(any())).thenReturn(response);
+
+        mockMvc.perform(post("/admin/device/cam/tracking/global/start")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"camChipId":"CAM-001"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.trackingStatus").value("armed"))
+                .andExpect(jsonPath("$.data.trackingMode").value("global"));
+    }
+
+    @Test
+    void globalTrackingStop_delegatesToFixedTrackingService() throws Exception {
+        DeviceTrackingStatusRespVO response = new DeviceTrackingStatusRespVO();
+        response.setTrackingStatus("stopped");
+        response.setTrackingMode("global");
+        when(fixedPersonTrackingService.stopGlobal(any())).thenReturn(response);
+
+        mockMvc.perform(post("/admin/device/cam/tracking/global/stop")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"camChipId":"CAM-001"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.trackingStatus").value("stopped"))
+                .andExpect(jsonPath("$.data.trackingMode").value("global"));
+    }
 }

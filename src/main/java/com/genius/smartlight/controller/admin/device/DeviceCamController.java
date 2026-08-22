@@ -9,6 +9,7 @@ import com.genius.smartlight.vo.device.DeviceCamCaptureBatchRespVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskReqVO;
 import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
+import com.genius.smartlight.vo.device.DeviceCamGlobalTrackingControlReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceRespVO;
 import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
@@ -102,6 +103,20 @@ public class DeviceCamController {
     public CommonResult<DeviceTrackingStatusRespVO> stopTracking(
             @Valid @RequestBody DeviceCamTrackingControlReqVO reqVO) {
         return CommonResult.success(fixedPersonTrackingService.stopManually(reqVO));
+    }
+
+    @Operation(summary = "手动开始 cam 到三个目标灯的 UDP 全局人物追踪")
+    @PostMapping("/cam/tracking/global/start")
+    public CommonResult<DeviceTrackingStatusRespVO> startGlobalTracking(
+            @Valid @RequestBody DeviceCamGlobalTrackingControlReqVO reqVO) {
+        return CommonResult.success(fixedPersonTrackingService.startGlobal(reqVO));
+    }
+
+    @Operation(summary = "手动停止 cam UDP 全局人物追踪")
+    @PostMapping("/cam/tracking/global/stop")
+    public CommonResult<DeviceTrackingStatusRespVO> stopGlobalTracking(
+            @Valid @RequestBody DeviceCamGlobalTrackingControlReqVO reqVO) {
+        return CommonResult.success(fixedPersonTrackingService.stopGlobal(reqVO));
     }
 
     @Operation(summary = "创建 cam 服装拍摄任务")

@@ -9,6 +9,9 @@ import com.genius.smartlight.dal.dataobject.DeviceDO;
 import com.genius.smartlight.dal.mysql.DeviceMapper;
 import com.genius.smartlight.dal.mysql.DurationRecordMapper;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureConfigVO;
+import com.genius.smartlight.vo.device.DeviceCamCaptureTargetVO;
+import com.genius.smartlight.vo.device.DeviceCamGlobalTrackingControlReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusReqVO;
 import com.genius.smartlight.vo.device.DeviceTrackingStatusRespVO;
 import com.genius.smartlight.websocket.DeviceSessionManager;
@@ -20,6 +23,10 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +59,8 @@ public class FixedPersonTrackingService {
     private final Map<String, String> clothStateByLamp = new ConcurrentHashMap<>();
     private final Map<String, TrackingSession> activeByCam = new ConcurrentHashMap<>();
     private final Map<String, String> activeCamByLamp = new ConcurrentHashMap<>();
+    private final Map<String, GlobalTrackingSession> activeGlobalByCam = new ConcurrentHashMap<>();
+    private final Map<String, String> activeGlobalCamByLamp = new ConcurrentHashMap<>();
 
     public void onLampProximity(String lampChipId, boolean nearby) {
         String lamp = normalizeChipId(lampChipId);
@@ -110,6 +119,11 @@ public class FixedPersonTrackingService {
         }
         TrackingSession session = activeByCam.get(camChipId);
         if (session == null) {
+            GlobalTrackingSession globalSession = activeGlobalByCam.get(camChipId);
+            if (globalSession != null) {
+                stopGlobalSession(globalSession, "manual tracking stopped", false);
+                return globalStatus(globalSession, "stopped", "manual tracking stopped");
+            }
             DeviceDO cam = requireCam(camChipId);
             return status(null, cam.getChipId(), reqVO.getTargetChipId(), reqVO.getTargetIndex(),
                     "stopped", "no active tracking session", cam.getStoreId());
@@ -117,6 +131,95 @@ public class FixedPersonTrackingService {
         stopSession(session, "manual tracking stopped", true);
         return status(session.sessionId(), session.camChipId(), session.lampChipId(), session.targetIndex(),
                 "stopped", "manual tracking stopped", session.storeId());
+    }
+
+    public synchronized DeviceTrackingStatusRespVO startGlobal(DeviceCamGlobalTrackingControlReqVO reqVO) {
+        DeviceDO cam = requireCam(reqVO.getCamChipId());
+        if (!deviceSessionManager.isOnline(cam.getChipId())) {
+            throw new ServiceException("摄像头离线，无法开始全局追踪");
+        }
+        String camIp = normalizeIpv4(cam.getIp());
+        if (camIp == null) {
+            throw new ServiceException("摄像头 IP 缺失或格式无效");
+        }
+
+        List<GlobalTrackingTarget> targets = resolveGlobalTargets(cam);
+        GlobalTrackingSession existing = activeGlobalByCam.get(cam.getChipId());
+        if (existing != null && sameGlobalTargets(existing.targets(), targets)) {
+            return globalStatus(existing, "tracking", "global tracking session already active");
+        }
+        if (existing != null) {
+            stopGlobalSession(existing, "global tracking targets changed", true);
+        }
+        TrackingSession singleSession = activeByCam.get(cam.getChipId());
+        if (singleSession != null) {
+            stopSession(singleSession, "switched to global tracking", true);
+        }
+
+        GlobalTrackingSession session = new GlobalTrackingSession(
+                UUID.randomUUID().toString(),
+                cam.getChipId(),
+                cam.getStoreId(),
+                targets
+        );
+        activeGlobalByCam.put(cam.getChipId(), session);
+        targets.forEach(target -> activeGlobalCamByLamp.put(target.lampChipId(), cam.getChipId()));
+
+        try {
+            for (GlobalTrackingTarget target : targets) {
+                ObjectNode lampCommand = createLampStartCommand(
+                        session.sessionId(),
+                        cam.getChipId(),
+                        camIp,
+                        target.lampChipId(),
+                        target.targetIndex(),
+                        "global"
+                );
+                if (!deviceSessionManager.sendToDevice(target.lampChipId(), lampCommand.toString())) {
+                    throw new ServiceException("目标灯 " + target.lampChipId() + " 追踪会话下发失败");
+                }
+            }
+
+            ObjectNode camCommand = objectMapper.createObjectNode();
+            camCommand.put("type", "cameraStartTracking");
+            camCommand.put("protocolVersion", TRACKING_PROTOCOL_VERSION);
+            camCommand.put("trackingMode", "global");
+            camCommand.put("sessionId", session.sessionId());
+            camCommand.put("camChipId", cam.getChipId());
+            camCommand.put("transport", "udp");
+            var targetArray = camCommand.putArray("targets");
+            for (GlobalTrackingTarget target : targets) {
+                ObjectNode targetNode = targetArray.addObject();
+                targetNode.put("targetIndex", target.targetIndex());
+                targetNode.put("targetChipId", target.lampChipId());
+                targetNode.put("lampIp", target.lampIp());
+                targetNode.put("udpPort", TRACKING_UDP_PORT);
+            }
+            if (!deviceSessionManager.sendToDevice(cam.getChipId(), camCommand.toString())) {
+                throw new ServiceException("摄像头全局追踪指令下发失败");
+            }
+        } catch (RuntimeException exception) {
+            stopGlobalSession(session, "global tracking start failed", false);
+            throw exception;
+        }
+
+        return globalStatus(session, "armed", "global tracking started");
+    }
+
+    public synchronized DeviceTrackingStatusRespVO stopGlobal(DeviceCamGlobalTrackingControlReqVO reqVO) {
+        String camChipId = normalizeChipId(reqVO.getCamChipId());
+        if (camChipId == null) {
+            throw new ServiceException("camChipId 不能为空");
+        }
+        DeviceDO cam = requireCam(camChipId);
+        captureConfigService.getForCurrentStore(cam.getChipId());
+        GlobalTrackingSession session = activeGlobalByCam.get(camChipId);
+        if (session == null) {
+            return globalStatus(null, cam.getChipId(), cam.getStoreId(), List.of(),
+                    "stopped", "no active global tracking session");
+        }
+        stopGlobalSession(session, "global tracking stopped manually", false);
+        return globalStatus(session, "stopped", "global tracking stopped manually");
     }
 
     public void onTrackingStatus(DeviceTrackingStatusReqVO reqVO) {
@@ -127,6 +230,25 @@ public class FixedPersonTrackingService {
         if (trackingStatus == null) {
             return;
         }
+        GlobalTrackingSession globalSession = findGlobalSession(reqVO);
+        if (globalSession != null) {
+            if (reqVO.getSessionId() != null
+                    && !reqVO.getSessionId().isBlank()
+                    && !globalSession.sessionId().equals(reqVO.getSessionId().trim())) {
+                log.debug("ignore stale global tracking status, sessionId={}, activeSession={}",
+                        reqVO.getSessionId(), globalSession.sessionId());
+                return;
+            }
+            if (Set.of("error", "lost", "stopped", "timeout").contains(trackingStatus)) {
+                stopGlobalSession(globalSession, "global tracking " + trackingStatus, true);
+                return;
+            }
+            if (Set.of("armed", "tracking").contains(trackingStatus)) {
+                globalStatus(globalSession, trackingStatus, reqVO.getMessage());
+            }
+            return;
+        }
+
         TrackingSession session = findSession(reqVO);
         if (session == null) {
             return;
@@ -167,6 +289,12 @@ public class FixedPersonTrackingService {
                         || sameChipId(normalized, session.lampChipId()))
                 .findFirst()
                 .ifPresent(session -> stopSession(session, "tracking device offline", true));
+        activeGlobalByCam.values().stream()
+                .filter(session -> sameChipId(normalized, session.camChipId())
+                        || session.targets().stream()
+                                .anyMatch(target -> sameChipId(normalized, target.lampChipId())))
+                .findFirst()
+                .ifPresent(session -> stopGlobalSession(session, "global tracking device offline", true));
     }
 
     private void persistDwell(String lampChipId, LocalDateTime startedAt, LocalDateTime endedAt) {
@@ -208,6 +336,9 @@ public class FixedPersonTrackingService {
 
         DeviceCamCaptureConfigService.CameraLampBinding target = binding.get();
         DeviceDO cam = requireCam(target.camChipId());
+        if (activeGlobalByCam.containsKey(cam.getChipId())) {
+            return;
+        }
         TrackingSession active = activeByCam.get(cam.getChipId());
         if (active != null && sameChipId(active.lampChipId(), lamp.getChipId())) {
             return;
@@ -247,6 +378,11 @@ public class FixedPersonTrackingService {
             throw new ServiceException("目标灯 IP 缺失或格式无效");
         }
 
+        GlobalTrackingSession globalSession = activeGlobalByCam.get(cam.getChipId());
+        if (globalSession != null) {
+            stopGlobalSession(globalSession, "switched to single-target tracking", true);
+        }
+
         TrackingSession existing = activeByCam.get(cam.getChipId());
         if (existing != null) {
             if (sameChipId(existing.lampChipId(), lamp.getChipId())) {
@@ -257,14 +393,8 @@ public class FixedPersonTrackingService {
         }
 
         String sessionId = UUID.randomUUID().toString();
-        ObjectNode lampCommand = objectMapper.createObjectNode();
-        lampCommand.put("type", "lampTrackingStart");
-        lampCommand.put("protocolVersion", TRACKING_PROTOCOL_VERSION);
-        lampCommand.put("sessionId", sessionId);
-        lampCommand.put("lampChipId", lamp.getChipId());
-        lampCommand.put("camChipId", cam.getChipId());
-        lampCommand.put("camIp", camIp);
-        lampCommand.put("udpPort", TRACKING_UDP_PORT);
+        ObjectNode lampCommand = createLampStartCommand(
+                sessionId, cam.getChipId(), camIp, lamp.getChipId(), targetIndex, "single");
 
         if (!deviceSessionManager.sendToDevice(lamp.getChipId(), lampCommand.toString())) {
             throw new ServiceException("目标灯追踪会话下发失败");
@@ -323,6 +453,40 @@ public class FixedPersonTrackingService {
         }
     }
 
+    private void stopGlobalSession(GlobalTrackingSession session, String reason, boolean pushStopped) {
+        if (session == null || !activeGlobalByCam.remove(session.camChipId(), session)) {
+            return;
+        }
+        for (GlobalTrackingTarget target : session.targets()) {
+            activeGlobalCamByLamp.remove(target.lampChipId(), session.camChipId());
+            sendLampStop(target.lampChipId(), session.camChipId(), session.sessionId(), reason);
+        }
+        sendGlobalCameraStop(session, reason);
+        if (pushStopped) {
+            globalStatus(session, "stopped", reason);
+        }
+    }
+
+    private ObjectNode createLampStartCommand(
+            String sessionId,
+            String camChipId,
+            String camIp,
+            String lampChipId,
+            int targetIndex,
+            String trackingMode) {
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("type", "lampTrackingStart");
+        command.put("protocolVersion", TRACKING_PROTOCOL_VERSION);
+        command.put("trackingMode", trackingMode);
+        command.put("sessionId", sessionId);
+        command.put("lampChipId", lampChipId);
+        command.put("camChipId", camChipId);
+        command.put("camIp", camIp);
+        command.put("targetIndex", targetIndex);
+        command.put("udpPort", TRACKING_UDP_PORT);
+        return command;
+    }
+
     private void sendLampStop(String lampChipId, String camChipId, String sessionId, String reason) {
         if (!deviceSessionManager.isOnline(lampChipId)) {
             return;
@@ -349,6 +513,47 @@ public class FixedPersonTrackingService {
         command.put("targetChipId", lampChipId);
         command.put("reason", reason == null ? "tracking stopped" : reason);
         deviceSessionManager.sendToDevice(camChipId, command.toString());
+    }
+
+    private void sendGlobalCameraStop(GlobalTrackingSession session, String reason) {
+        if (!deviceSessionManager.isOnline(session.camChipId())) {
+            return;
+        }
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("type", "cameraTrackingStop");
+        command.put("protocolVersion", TRACKING_PROTOCOL_VERSION);
+        command.put("trackingMode", "global");
+        command.put("sessionId", session.sessionId());
+        command.put("camChipId", session.camChipId());
+        command.put("reason", reason == null ? "global tracking stopped" : reason);
+        var targets = command.putArray("targets");
+        session.targets().forEach(target -> {
+            ObjectNode node = targets.addObject();
+            node.put("targetIndex", target.targetIndex());
+            node.put("targetChipId", target.lampChipId());
+            node.put("lampIp", target.lampIp());
+            node.put("udpPort", TRACKING_UDP_PORT);
+        });
+        deviceSessionManager.sendToDevice(session.camChipId(), command.toString());
+    }
+
+    private GlobalTrackingSession findGlobalSession(DeviceTrackingStatusReqVO reqVO) {
+        String camChipId = normalizeChipId(reqVO.getCamChipId());
+        if (camChipId == null && "cam".equalsIgnoreCase(reqVO.getRole())) {
+            camChipId = normalizeChipId(reqVO.getChipId());
+        }
+        if (camChipId != null) {
+            GlobalTrackingSession session = activeGlobalByCam.get(camChipId);
+            if (session != null) {
+                return session;
+            }
+        }
+        String lampChipId = normalizeChipId(reqVO.getLampChipId());
+        if (lampChipId == null && "lamp".equalsIgnoreCase(reqVO.getRole())) {
+            lampChipId = normalizeChipId(reqVO.getChipId());
+        }
+        String mappedCam = lampChipId == null ? null : activeGlobalCamByLamp.get(lampChipId);
+        return mappedCam == null ? null : activeGlobalByCam.get(mappedCam);
     }
 
     private TrackingSession findSession(DeviceTrackingStatusReqVO reqVO) {
@@ -379,14 +584,111 @@ public class FixedPersonTrackingService {
         resp.setChipId(camChipId);
         resp.setRole("cam");
         resp.setTrackingStatus(trackingStatus);
+        resp.setTrackingMode("single");
         resp.setSessionId(sessionId);
         resp.setCamChipId(camChipId);
         resp.setLampChipId(lampChipId);
         resp.setTargetIndex(targetIndex);
+        resp.setTargetChipIds(lampChipId == null ? List.of() : List.of(lampChipId));
         resp.setMessage(message);
         resp.setUpdateTime(LocalDateTime.now());
         webSocketPushService.pushTrackingStatus(resp, storeId);
         return resp;
+    }
+
+    private DeviceTrackingStatusRespVO globalStatus(
+            GlobalTrackingSession session,
+            String trackingStatus,
+            String message) {
+        return globalStatus(
+                session == null ? null : session.sessionId(),
+                session == null ? null : session.camChipId(),
+                session == null ? null : session.storeId(),
+                session == null ? List.of() : session.targets(),
+                trackingStatus,
+                message
+        );
+    }
+
+    private DeviceTrackingStatusRespVO globalStatus(
+            String sessionId,
+            String camChipId,
+            Long storeId,
+            List<GlobalTrackingTarget> targets,
+            String trackingStatus,
+            String message) {
+        DeviceTrackingStatusRespVO resp = new DeviceTrackingStatusRespVO();
+        resp.setChipId(camChipId);
+        resp.setRole("cam");
+        resp.setTrackingStatus(trackingStatus);
+        resp.setTrackingMode("global");
+        resp.setSessionId(sessionId);
+        resp.setCamChipId(camChipId);
+        resp.setTargetChipIds(targets.stream().map(GlobalTrackingTarget::lampChipId).toList());
+        resp.setMessage(message);
+        resp.setUpdateTime(LocalDateTime.now());
+        webSocketPushService.pushTrackingStatus(resp, storeId);
+        return resp;
+    }
+
+    private List<GlobalTrackingTarget> resolveGlobalTargets(DeviceDO cam) {
+        DeviceCamCaptureConfigVO config = captureConfigService.getForCurrentStore(cam.getChipId());
+        List<DeviceCamCaptureTargetVO> configuredTargets = config == null || config.getTargets() == null
+                ? List.of()
+                : config.getTargets().stream()
+                        .filter(target -> target != null && target.getIndex() != null)
+                        .sorted(Comparator.comparingInt(DeviceCamCaptureTargetVO::getIndex))
+                        .toList();
+        if (configuredTargets.size() != 3) {
+            throw new ServiceException("全局追踪要求完整配置三个目标灯");
+        }
+
+        HashSet<String> uniqueLampIds = new HashSet<>();
+        List<GlobalTrackingTarget> targets = new ArrayList<>();
+        for (int expectedIndex = 1; expectedIndex <= 3; expectedIndex++) {
+            final int targetIndex = expectedIndex;
+            DeviceCamCaptureTargetVO configured = configuredTargets.stream()
+                    .filter(target -> target.getIndex() == targetIndex)
+                    .findFirst()
+                    .orElseThrow(() -> new ServiceException("拍摄目标 " + targetIndex + " 未配置"));
+            String lampChipId = normalizeChipId(configured.getLampChipId());
+            if (lampChipId == null) {
+                throw new ServiceException("拍摄目标 " + targetIndex + " 未绑定目标灯");
+            }
+            if (!uniqueLampIds.add(lampChipId.toUpperCase(Locale.ROOT))) {
+                throw new ServiceException("全局追踪的三个目标灯不能重复");
+            }
+
+            DeviceDO lamp = requireLamp(lampChipId);
+            requireSameStore(cam, lamp);
+            if (!deviceSessionManager.isOnline(lamp.getChipId())) {
+                throw new ServiceException("目标灯 " + lamp.getChipId() + " 离线，无法开始全局追踪");
+            }
+            String lampIp = normalizeIpv4(lamp.getIp());
+            if (lampIp == null) {
+                throw new ServiceException("目标灯 " + lamp.getChipId() + " IP 缺失或格式无效");
+            }
+            targets.add(new GlobalTrackingTarget(targetIndex, lamp.getChipId(), lampIp));
+        }
+        return List.copyOf(targets);
+    }
+
+    private boolean sameGlobalTargets(
+            List<GlobalTrackingTarget> left,
+            List<GlobalTrackingTarget> right) {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        for (int index = 0; index < left.size(); index++) {
+            GlobalTrackingTarget a = left.get(index);
+            GlobalTrackingTarget b = right.get(index);
+            if (a.targetIndex() != b.targetIndex()
+                    || !sameChipId(a.lampChipId(), b.lampChipId())
+                    || !a.lampIp().equals(b.lampIp())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private DeviceDO requireCam(String chipId) {
@@ -477,5 +779,18 @@ public class FixedPersonTrackingService {
             int targetIndex,
             Long storeId,
             TrackingSource source) {
+    }
+
+    private record GlobalTrackingTarget(
+            int targetIndex,
+            String lampChipId,
+            String lampIp) {
+    }
+
+    private record GlobalTrackingSession(
+            String sessionId,
+            String camChipId,
+            Long storeId,
+            List<GlobalTrackingTarget> targets) {
     }
 }

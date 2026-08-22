@@ -11,6 +11,7 @@ import com.genius.smartlight.security.SecurityUtils;
 import com.genius.smartlight.service.device.DeviceControlService;
 import com.genius.smartlight.service.device.SliderMotionStateService;
 import com.genius.smartlight.vo.device.DeviceArmControlReqVO;
+import com.genius.smartlight.vo.device.DeviceCamPtzReqVO;
 import com.genius.smartlight.websocket.DeviceAnnounceNotifier;
 import com.genius.smartlight.websocket.DeviceSessionManager;
 import org.junit.jupiter.api.BeforeEach;
@@ -100,6 +101,47 @@ class DeviceGatewayControllerArmControlTest {
     }
 
     @Test
+    void armPosition_usesNativeZeroToOneEightyRangeForCaptureControllerSg90() throws Exception {
+        DeviceDO captureController = new DeviceDO();
+        captureController.setChipId(CHIP_ID);
+        captureController.setDeviceType("cam_capture");
+        captureController.setStoreId(7L);
+        when(deviceMapper.selectOne(any())).thenReturn(captureController);
+
+        DeviceArmControlReqVO request = new DeviceArmControlReqVO();
+        request.setType("arm_position");
+        request.setPan(180f);
+        request.setTilt(0f);
+
+        try (MockedStatic<SecurityUtils> securityUtils = mockStatic(SecurityUtils.class)) {
+            securityUtils.when(SecurityUtils::getCurrentUserId).thenReturn(42L);
+            controller.armControl(CHIP_ID, request);
+        }
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager).sendToDevice(eq(CHIP_ID), payloadCaptor.capture());
+        JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
+        assertThat(payload.path("pan").floatValue()).isEqualTo(180f);
+        assertThat(payload.path("tilt").floatValue()).isEqualTo(0f);
+    }
+
+    @Test
+    void armPosition_rejectsNegativeSg90AngleForCaptureController() {
+        DeviceDO captureController = new DeviceDO();
+        captureController.setChipId(CHIP_ID);
+        captureController.setDeviceType("cam_capture");
+        captureController.setStoreId(7L);
+        when(deviceMapper.selectOne(any())).thenReturn(captureController);
+
+        try (MockedStatic<SecurityUtils> securityUtils = mockStatic(SecurityUtils.class)) {
+            securityUtils.when(SecurityUtils::getCurrentUserId).thenReturn(42L);
+            assertThatThrownBy(() -> controller.armControl(CHIP_ID, positionRequest(-0.1f)))
+                    .isInstanceOf(ServiceException.class)
+                    .hasMessageContaining("pan range must be 0.0 to 180.0 degrees");
+        }
+    }
+
+    @Test
     void armPosition_accepts2500MmAndPersistsBackendPosition() {
         DeviceArmControlReqVO request = new DeviceArmControlReqVO();
         request.setType("arm_position");
@@ -125,6 +167,32 @@ class DeviceGatewayControllerArmControlTest {
                     .isInstanceOf(ServiceException.class)
                     .hasMessageContaining("2500.0 mm");
         }
+    }
+
+    @Test
+    void camPtzControl_acceptsCaptureControllerDevice() throws Exception {
+        DeviceDO captureController = new DeviceDO();
+        captureController.setChipId(CHIP_ID);
+        captureController.setDeviceType("cam_capture");
+        captureController.setStoreId(7L);
+        when(deviceMapper.selectOne(any())).thenReturn(captureController);
+
+        DeviceCamPtzReqVO request = new DeviceCamPtzReqVO();
+        request.setChipId(CHIP_ID);
+        request.setAxis("yaw");
+        request.setDirection("left");
+        request.setStep(5);
+
+        try (MockedStatic<SecurityUtils> securityUtils = mockStatic(SecurityUtils.class)) {
+            securityUtils.when(SecurityUtils::getCurrentUserId).thenReturn(42L);
+            controller.camPtzControl(request);
+        }
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager).sendToDevice(eq(CHIP_ID), payloadCaptor.capture());
+        JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
+        assertThat(payload.path("type").asText()).isEqualTo("ptzControl");
+        assertThat(payload.path("axis").asText()).isEqualTo("yaw");
     }
 
     private DeviceArmControlReqVO positionRequest(float pan) {

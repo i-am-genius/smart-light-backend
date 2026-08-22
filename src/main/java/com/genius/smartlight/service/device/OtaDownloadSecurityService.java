@@ -28,7 +28,7 @@ public class OtaDownloadSecurityService {
             .normalize();
 
     private static final Pattern OTA_RELATIVE_PATH_PATTERN = Pattern.compile(
-            "^(lamp|cam|camlamp)/(stable|test)/[1-9][0-9]*/firmware\\.bin$"
+            "^(lamp|cam|camlamp|cam_capture)/(stable|test)/[1-9][0-9]*/firmware\\.bin$"
     );
     private static final Pattern HOST_PATTERN = Pattern.compile("^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$");
     private static final String HMAC_ALGORITHM = "HmacSHA256";

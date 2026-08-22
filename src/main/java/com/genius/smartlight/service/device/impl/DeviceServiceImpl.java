@@ -222,7 +222,7 @@ public class DeviceServiceImpl implements DeviceService {
         DeviceRespVO respVO = toResp(currentDevice);
 
         webSocketPushService.pushState(respVO);
-        if (!DeviceTypeUtil.isCam(respVO.getDeviceType())) {
+        if (DeviceTypeUtil.isLampLike(respVO.getDeviceType())) {
             webSocketPushService.pushStateToDevice(currentDevice.getChipId(), respVO);
         }
         log.info("Device updated, id={}, chipId={}, storeId={}, lightControl={}",
@@ -254,8 +254,7 @@ public class DeviceServiceImpl implements DeviceService {
         log.debug("Device online state before resume_broadcast, chipId={}, online={}", chipId, online);
 
         if (!online) {
-            log.warn("设备离线，无法发送恢复广播指令, chipId={}", chipId);
-            return;
+            log.warn("设备在线时间已过期，仍尝试通过现有 session 发送恢复广播指令, chipId={}", chipId);
         }
 
         try {
@@ -428,7 +427,7 @@ public class DeviceServiceImpl implements DeviceService {
         String type = DeviceTypeUtil.normalize(device.getDeviceType());
         device.setDeviceType(type);
 
-        if (!DeviceTypeUtil.isCam(type)) {
+        if (DeviceTypeUtil.isLampLike(type)) {
             if (device.getGarmentAimEnabled() == null) {
                 device.setGarmentAimEnabled(false);
             }

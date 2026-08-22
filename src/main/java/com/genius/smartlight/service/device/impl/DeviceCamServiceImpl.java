@@ -115,14 +115,16 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private final Set<String> failedAutomaticDetectionBatches = ConcurrentHashMap.newKeySet();
     private final Map<String, DeviceTrackingStatusRespVO> trackingCache = new ConcurrentHashMap<>();
     private final Map<String, TrackingSession> activeTrackingByCam = new ConcurrentHashMap<>();
-    private final Map<String, PendingTracking> pendingTrackingByCam = new ConcurrentHashMap<>();
-    private final Map<String, String> pendingTrackingBySliderLamp = new ConcurrentHashMap<>();
     private final Map<String, PresenceDurationState> presenceDurationState = new ConcurrentHashMap<>();
     private final Map<String, String> captureUploadTokens = new ConcurrentHashMap<>();
     private final Map<String, PendingCaptureMotion> pendingCaptureMotions = new ConcurrentHashMap<>();
     private final Map<String, String> activeCaptureTaskBySliderLamp = new ConcurrentHashMap<>();
     private final Map<String, String> activeCaptureTaskByCam = new ConcurrentHashMap<>();
+    private final Map<String, String> activeCaptureTaskByCaptureController = new ConcurrentHashMap<>();
     private final Map<String, String> captureSliderLampByTask = new ConcurrentHashMap<>();
+    private final Map<String, String> captureControllerByTask = new ConcurrentHashMap<>();
+    private final Map<String, CollisionGuardSession> retainedCaptureGuards = new ConcurrentHashMap<>();
+    private final Map<String, PendingSingleReturn> pendingSingleReturns = new ConcurrentHashMap<>();
     private final Map<String, PendingBatchReturn> pendingBatchReturns = new ConcurrentHashMap<>();
     private final ScheduledExecutorService captureTimeoutExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "cam-capture-timeout");
@@ -148,11 +150,44 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     @Override
+    public void pushCaptureControllerConfigForDevice(String captureControllerChipId) {
+        if (!notBlank(captureControllerChipId) || !Files.isDirectory(CAM_CONFIG_DIR)) {
+            return;
+        }
+        try (var paths = Files.list(CAM_CONFIG_DIR)) {
+            for (Path path : paths.filter(Files::isRegularFile).sorted().toList()) {
+                try {
+                    DeviceCamRoiConfigVO saved = objectMapper.readValue(
+                            path.toFile(),
+                            DeviceCamRoiConfigVO.class
+                    );
+                    if (!notBlank(saved.getCamChipId())) {
+                        continue;
+                    }
+                    DeviceCamRoiConfigVO normalized = normalizeConfig(saved.getCamChipId(), saved);
+                    if (sameChipId(normalized.getCaptureControllerChipId(), captureControllerChipId)) {
+                        pushCaptureControllerConfig(normalized);
+                        return;
+                    }
+                } catch (IOException | RuntimeException e) {
+                    log.warn("read capture controller binding config failed, path={}", path, e);
+                }
+            }
+        } catch (IOException e) {
+            log.warn("scan capture controller binding config failed, captureControllerChipId={}",
+                    captureControllerChipId, e);
+        }
+    }
+
+    @Override
     public DeviceCamRoiConfigVO saveRoiConfig(String camChipId, DeviceCamRoiConfigVO config) {
         DeviceDO cam = requireCamForCurrentStore(camChipId);
         DeviceCamRoiConfigVO normalized = normalizeConfig(cam.getChipId(), config);
         if (notBlank(normalized.getSliderLampChipId())) {
             requireLampLikeForCurrentStore(normalized.getSliderLampChipId());
+        }
+        if (notBlank(normalized.getCaptureControllerChipId())) {
+            requireCaptureControllerForCurrentStore(normalized.getCaptureControllerChipId());
         }
         Map<String, DeviceDO> targetDevices = new LinkedHashMap<>();
         for (DeviceCamRoiItemVO roi : normalized.getRois()) {
@@ -163,6 +198,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
         writeRoiConfig(normalized);
         pushRoiConfigToCam(cam.getChipId(), normalized);
+        pushCaptureControllerConfig(normalized);
         pushLampIpsToCamByHttp(cam, normalized, targetDevices);
         webSocketPushService.pushCamStatus(Map.of(
                 "camChipId", cam.getChipId(),
@@ -181,6 +217,57 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             }
         } catch (Exception e) {
             log.warn("push cam roi config failed, camChipId={}", camChipId, e);
+        }
+    }
+
+    private void pushCaptureControllerConfig(DeviceCamRoiConfigVO config) {
+        if (config == null || !notBlank(config.getCaptureControllerChipId())) {
+            return;
+        }
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("type", "captureControllerConfig");
+        payload.put("camChipId", config.getCamChipId());
+        payload.put("captureControllerChipId", config.getCaptureControllerChipId());
+        payload.put("flowUploadEnabled", Boolean.TRUE.equals(config.getFlowUploadEnabled()));
+        payload.put("flowUploadIntervalSeconds", config.getFlowUploadIntervalSeconds());
+        var captureAreas = payload.putArray("captureAreas");
+        for (DeviceCamRoiItemVO roi : config.getRois()) {
+            ObjectNode area = captureAreas.addObject();
+            area.put("targetIndex", roi.getTargetIndex());
+            ObjectNode garmentPreset = area.putObject("garmentCapturePreset");
+            garmentPreset.put("pan", roi.getGarmentCapturePan());
+            garmentPreset.put("tilt", roi.getGarmentCaptureTilt());
+            ObjectNode personPreset = area.putObject("personCapturePreset");
+            personPreset.put("pan", roi.getPersonCapturePan());
+            personPreset.put("tilt", roi.getPersonCaptureTilt());
+        }
+        // 兼容尚未升级到分区预置协议的拍照控制器；区域任务本身仍会携带精确角度。
+        DeviceCamRoiItemVO fallbackArea = config.getRois().stream().findFirst().orElse(null);
+        if (fallbackArea != null) {
+            ObjectNode garmentPreset = payload.putObject("garmentCapturePreset");
+            garmentPreset.put("pan", fallbackArea.getGarmentCapturePan());
+            garmentPreset.put("tilt", fallbackArea.getGarmentCaptureTilt());
+            ObjectNode personPreset = payload.putObject("personCapturePreset");
+            personPreset.put("pan", fallbackArea.getPersonCapturePan());
+            personPreset.put("tilt", fallbackArea.getPersonCaptureTilt());
+        }
+        payload.put(
+                "flowUploadUrl",
+                "/device/cam/flow-photo?camChipId=" + config.getCamChipId()
+                        + "&captureControllerChipId=" + config.getCaptureControllerChipId()
+        );
+        try {
+            boolean sent = deviceSessionManager.sendToDevice(
+                    config.getCaptureControllerChipId(),
+                    payload.toString()
+            );
+            if (!sent) {
+                log.warn("push capture controller config skipped or failed, captureControllerChipId={}",
+                        config.getCaptureControllerChipId());
+            }
+        } catch (RuntimeException e) {
+            log.warn("push capture controller config failed, captureControllerChipId={}",
+                    config.getCaptureControllerChipId(), e);
         }
     }
 
@@ -294,6 +381,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         resp.setMessage(reqVO.getMessage());
         resp.setUpdateTime(LocalDateTime.now());
         statusCache.put(cam.getChipId(), resp);
+        recoverTrackingCacheFromCamStatus(cam, resp);
         webSocketPushService.pushCamStatus(resp, cam.getStoreId());
         return resp;
     }
@@ -324,16 +412,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
         String requestedKey = trackingKey(lamp.getChipId(), targetIndex);
         TrackingSession active = activeTrackingByCam.get(cam.getChipId());
-        PendingTracking pending = pendingTrackingByCam.get(cam.getChipId());
-        if ((active != null && !requestedKey.equals(active.trackingKey()))
-                || (pending != null && !requestedKey.equals(pending.trackingKey()))) {
+        if (active != null && !requestedKey.equals(active.trackingKey())) {
             stopTrackingIfActive(cam.getChipId(), "manual tracking target changed");
         }
 
         TrackingCandidate candidate = trackingCandidate(cam.getChipId(), lamp.getChipId(), targetIndex);
-        startTrackingIfNeeded(candidate, config, TrackingSource.MANUAL, "manual tracking started");
+        startTrackingIfNeeded(candidate, TrackingSource.MANUAL, "manual tracking started");
         DeviceTrackingStatusRespVO result = trackingCache.get(cam.getChipId());
-        if (result == null || !Set.of("waiting_motion", "tracking").contains(result.getTrackingStatus())) {
+        if (result == null || !"tracking".equals(result.getTrackingStatus())) {
             throw new ServiceException(result == null ? "追踪指令下发失败" : result.getMessage());
         }
         return result;
@@ -352,7 +438,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             throw new ServiceException("目标灯离线，无法停止追踪");
         }
 
-        cancelPendingTracking(cam.getChipId());
         activeTrackingByCam.remove(cam.getChipId());
         sendLampTrackingStop(lamp.getChipId(), cam.getChipId(), "manual tracking stopped", false);
         sendCameraReturnCenter(cam, "manual tracking stopped");
@@ -370,9 +455,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     @Override
     public DeviceCamCaptureTaskRespVO createCaptureTask(DeviceCamCaptureTaskReqVO reqVO) {
         DeviceDO cam = requireCamForCurrentStore(reqVO.getCamChipId());
-        if (!deviceSessionManager.isOnline(cam.getChipId())) {
-            throw new ServiceException("cam 离线，无法创建拍摄任务");
-        }
         String targetChipId = resolveTargetChipId(cam.getChipId(), reqVO.getTargetIndex(), reqVO.getTargetChipId());
         DeviceDO target = requireLampLikeForCurrentStore(targetChipId);
         int targetIndex = resolveCaptureTargetIndex(
@@ -381,11 +463,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 target.getChipId()
         );
         DeviceCamRoiConfigVO config = readRoiConfig(cam.getChipId());
+        DeviceDO captureController = requireCaptureControllerForCurrentStore(config);
+        if (!deviceSessionManager.isOnline(captureController.getChipId())) {
+            throw new ServiceException("拍照控制器离线，无法创建拍摄任务");
+        }
         DeviceDO sliderLamp = requireSliderLampForCurrentStore(config);
         if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
             throw new ServiceException("滑轨控制灯离线，无法执行滑轨对位");
         }
-        requireTrackingSlotsAvailable(cam.getChipId(), sliderLamp.getChipId());
         double sliderTargetMm = resolveSliderPreset(config, targetIndex);
         TimedSliderMotion motionPlan = planSliderMotion(
                 config,
@@ -393,6 +478,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 sliderLamp,
                 sliderTargetMm
         );
+        double singleReturnSliderMm = resolveSingleReturnSliderPreset(config, targetIndex);
+        planSliderMotion(config, targetIndex, sliderLamp, singleReturnSliderMm);
 
         DeviceCamCaptureTaskRespVO task = new DeviceCamCaptureTaskRespVO();
         task.setTaskId(UUID.randomUUID().toString());
@@ -414,14 +501,31 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), task.getTaskId());
             throw e;
         }
+        try {
+            claimCaptureSlot(
+                    activeCaptureTaskByCaptureController,
+                    captureController.getChipId(),
+                    task.getTaskId(),
+                    "拍照控制器已有拍摄任务执行中"
+            );
+        } catch (RuntimeException e) {
+            activeCaptureTaskByCam.remove(cam.getChipId(), task.getTaskId());
+            activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), task.getTaskId());
+            throw e;
+        }
         captureSliderLampByTask.put(task.getTaskId(), sliderLamp.getChipId());
+        captureControllerByTask.put(task.getTaskId(), captureController.getChipId());
         taskCache.put(task.getTaskId(), task);
         String uploadToken = UUID.randomUUID().toString().replace("-", "");
         captureUploadTokens.put(task.getTaskId(), uploadToken);
+        DeviceCamRoiItemVO captureRoi = requireCaptureRoi(config, targetIndex);
 
         PendingCaptureMotion pending = new PendingCaptureMotion(
                 cam.getChipId(),
                 sliderLamp.getChipId(),
+                captureController.getChipId(),
+                captureRoi.getGarmentCapturePan(),
+                captureRoi.getGarmentCaptureTilt(),
                 target.getChipId(),
                 targetIndex,
                 sliderTargetMm,
@@ -430,32 +534,31 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         );
         pendingCaptureMotions.put(task.getTaskId(), pending);
 
-        ObjectNode motion = objectMapper.createObjectNode();
-        motion.put("type", "arm_position");
-        motion.put("source", "camera_capture");
-        motion.put("taskId", task.getTaskId());
-        motion.put("slider", sliderTargetMm);
-        boolean motionSent;
+        CollisionGuardSession guardSession;
         try {
-            motionSent = deviceSessionManager.sendToDevice(sliderLamp.getChipId(), motion.toString());
+            guardSession = prepareCollisionGuards(config, motionPlan, task.getTaskId());
+            retainCollisionGuards(task.getTaskId(), guardSession);
         } catch (RuntimeException e) {
             discardCaptureTask(task);
             throw e;
         }
-        if (!motionSent) {
-            discardCaptureTask(task);
-            throw new ServiceException("滑轨对位指令发送失败");
-        }
-
-        try {
-            beginSliderMotion(sliderLamp, motionPlan);
-        } catch (RuntimeException e) {
-            discardCaptureTask(task);
-            log.warn("slider state save failed, taskId={}", task.getTaskId(), e);
-            throw new ServiceException("滑轨位置状态保存失败，请检查数据库迁移");
-        }
         webSocketPushService.pushCamCaptureTask(task, cam.getStoreId());
-        scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
+        Runnable dispatch = () -> {
+            try {
+                sendSliderMotionCommand(sliderLamp.getChipId(), sliderTargetMm,
+                        "camera_capture", task.getTaskId());
+                beginSliderMotion(sliderLamp, motionPlan);
+                scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
+            } catch (RuntimeException e) {
+                releaseRetainedCollisionGuards(task.getTaskId());
+                failCaptureTask(task, "motion_command_failed", e.getMessage(), cam.getStoreId());
+            }
+        };
+        if (guardSession.parkDelayMs() > 0L) {
+            captureTimeoutExecutor.schedule(dispatch, guardSession.parkDelayMs(), TimeUnit.MILLISECONDS);
+        } else {
+            dispatch.run();
+        }
         return task;
     }
 
@@ -466,17 +569,17 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     private DeviceCamCaptureBatchRespVO createCaptureBatchForCam(DeviceDO cam) {
-        if (!deviceSessionManager.isOnline(cam.getChipId())) {
-            throw new ServiceException("cam 离线，无法创建批量拍摄任务");
-        }
         DeviceCamRoiConfigVO config = readRoiConfig(cam.getChipId());
+        DeviceDO captureController = requireCaptureController(config);
+        requireSameStore(cam, captureController);
+        if (!deviceSessionManager.isOnline(captureController.getChipId())) {
+            throw new ServiceException("拍照控制器离线，无法执行批量拍摄");
+        }
         DeviceDO sliderLamp = requireSliderLamp(config);
         requireSameStore(cam, sliderLamp);
         if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
             throw new ServiceException("滑轨控制灯离线，无法执行批量拍摄");
         }
-        requireTrackingSlotsAvailable(cam.getChipId(), sliderLamp.getChipId());
-
         List<BatchCaptureTarget> targets = buildBatchCaptureTargets(config, cam.getStoreId());
         validateBatchMotionCalibration(config, sliderLamp, targets);
         String batchId = UUID.randomUUID().toString();
@@ -499,7 +602,20 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), batchId);
             throw e;
         }
+        try {
+            claimCaptureSlot(
+                    activeCaptureTaskByCaptureController,
+                    captureController.getChipId(),
+                    batchId,
+                    "拍照控制器已有拍摄任务执行中"
+            );
+        } catch (RuntimeException e) {
+            activeCaptureTaskByCam.remove(cam.getChipId(), batchId);
+            activeCaptureTaskBySliderLamp.remove(sliderLamp.getChipId(), batchId);
+            throw e;
+        }
         captureSliderLampByTask.put(batchId, sliderLamp.getChipId());
+        captureControllerByTask.put(batchId, captureController.getChipId());
         batchCache.put(batchId, batch);
 
         try {
@@ -521,17 +637,15 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 captureUploadTokens.put(task.getTaskId(), UUID.randomUUID().toString().replace("-", ""));
             }
 
-            BatchCaptureTarget targetTwo = targets.stream()
-                    .filter(target -> target.targetIndex() == 2)
-                    .findFirst()
-                    .orElseThrow(() -> new ServiceException("区域 2 滑轨预设缺失"));
+            double standbySliderMm = resolveStandbySliderPreset(config, targets);
             CaptureBatchContext context = new CaptureBatchContext(
                     batch,
                     targets,
                     sliderLamp.getChipId(),
+                    captureController.getChipId(),
                     cam.getStoreId(),
                     config,
-                    targetTwo
+                    standbySliderMm
             );
             batchContexts.put(batchId, context);
             for (DeviceCamCaptureTaskRespVO queuedTask : batch.getTasks()) {
@@ -585,34 +699,73 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 sliderLamp.getChipId(),
                 sliderLamp.getStoreId()
         );
-        SliderCalibration calibration = resolveSliderCalibration(config, targetIndex, snapshot.speedMode());
+        String confirmedSpeedMode = sliderMotionStateService.requireConfirmedSpeedMode(
+                sliderLamp.getChipId(), sliderLamp.getStoreId());
+        SliderCalibration calibration = resolveSliderCalibration(config, targetIndex, confirmedSpeedMode);
         long delayMs = SliderMotionEstimator.estimateDelayMs(
                 snapshot.currentPositionMm(),
                 targetPositionMm,
                 calibration.distanceMm(),
                 calibration.timeSeconds()
         );
-        LocalDateTime startedAt = LocalDateTime.now();
-        long travelMs = Math.max(1L, delayMs - SliderMotionEstimator.SAFETY_MARGIN_MS);
         return new TimedSliderMotion(
                 snapshot.currentPositionMm(),
                 targetPositionMm,
-                snapshot.speedMode(),
-                startedAt,
-                startedAt.plusNanos(TimeUnit.MILLISECONDS.toNanos(travelMs)),
+                confirmedSpeedMode,
                 delayMs
         );
     }
 
+    private double resolveStandbySliderPreset(DeviceCamRoiConfigVO config, List<BatchCaptureTarget> targets) {
+        BatchCaptureTarget lampTwo = targets.stream().filter(target -> target.targetIndex() == 2)
+                .findFirst().orElseThrow(() -> new ServiceException("区域 2 滑轨预设缺失"));
+        BatchCaptureTarget farthest = targets.stream()
+                .max(Comparator.comparingDouble(target -> Math.abs(
+                        target.sliderTargetMm() - lampTwo.sliderTargetMm())))
+                .orElseThrow(() -> new ServiceException("拍摄目标滑轨预设缺失"));
+        if (Math.abs(lampTwo.sliderTargetMm() - farthest.sliderTargetMm()) < 1D) {
+            throw new ServiceException("区域 2 与最远灯的滑轨预设过近，无法自动计算安全待机位");
+        }
+        return Math.round((lampTwo.sliderTargetMm() + farthest.sliderTargetMm()) / 2D);
+    }
+
+    private double resolveSingleReturnSliderPreset(DeviceCamRoiConfigVO config, int targetIndex) {
+        double targetOneMm = resolveSliderPreset(config, 1);
+        double targetTwoMm = resolveSliderPreset(config, 2);
+        double targetThreeMm = resolveSliderPreset(config, 3);
+        double targetMm;
+        if (targetIndex == 1) {
+            targetMm = midpoint(targetOneMm, targetTwoMm);
+        } else if (targetIndex == 3) {
+            targetMm = midpoint(targetTwoMm, targetThreeMm);
+        } else {
+            double leftMidpoint = midpoint(targetOneMm, targetTwoMm);
+            double rightMidpoint = midpoint(targetTwoMm, targetThreeMm);
+            targetMm = Math.abs(leftMidpoint - targetTwoMm) >= Math.abs(rightMidpoint - targetTwoMm)
+                    ? leftMidpoint : rightMidpoint;
+        }
+        double capturedTargetMm = resolveSliderPreset(config, targetIndex);
+        if (Math.abs(targetMm - capturedTargetMm) < 1D) {
+            throw new ServiceException("相邻灯滑轨预设过近，无法自动计算单点拍照安全撤离位置");
+        }
+        return Math.round(targetMm);
+    }
+
+    private double midpoint(double firstMm, double secondMm) {
+        return (firstMm + secondMm) / 2D;
+    }
+
     private void beginSliderMotion(DeviceDO sliderLamp, TimedSliderMotion motionPlan) {
+        LocalDateTime startedAt = LocalDateTime.now();
+        long travelMs = Math.max(1L, motionPlan.delayMs() - SliderMotionEstimator.SAFETY_MARGIN_MS);
         sliderMotionStateService.beginMotion(
                 sliderLamp.getChipId(),
                 sliderLamp.getStoreId(),
                 motionPlan.currentPositionMm(),
                 motionPlan.targetPositionMm(),
                 motionPlan.speedMode(),
-                motionPlan.startedAt(),
-                motionPlan.motionEndAt()
+                startedAt,
+                startedAt.plusNanos(TimeUnit.MILLISECONDS.toNanos(travelMs))
         );
     }
 
@@ -624,11 +777,13 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 sliderLamp.getChipId(),
                 sliderLamp.getStoreId()
         );
+        String confirmedSpeedMode = sliderMotionStateService.requireConfirmedSpeedMode(
+                sliderLamp.getChipId(), sliderLamp.getStoreId());
         for (BatchCaptureTarget target : targets) {
             SliderCalibration calibration = resolveSliderCalibration(
                     config,
                     target.targetIndex(),
-                    snapshot.speedMode()
+                    confirmedSpeedMode
             );
             SliderMotionEstimator.estimateDelayMs(
                     snapshot.currentPositionMm(),
@@ -637,6 +792,13 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                     calibration.timeSeconds()
             );
         }
+        BatchCaptureTarget finalTarget = targets.get(targets.size() - 1);
+        planSliderMotion(
+                config,
+                finalTarget.targetIndex(),
+                sliderLamp,
+                resolveStandbySliderPreset(config, targets)
+        );
     }
 
     private List<BatchCaptureTarget> buildBatchCaptureTargets(DeviceCamRoiConfigVO config, Long storeId) {
@@ -700,9 +862,13 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
 
         String uploadToken = captureUploadTokens.get(task.getTaskId());
+        DeviceCamRoiItemVO captureRoi = requireCaptureRoi(context.config(), target.targetIndex());
         PendingCaptureMotion pending = new PendingCaptureMotion(
                 task.getCamChipId(),
                 context.sliderLampChipId(),
+                context.captureControllerChipId(),
+                captureRoi.getGarmentCapturePan(),
+                captureRoi.getGarmentCaptureTilt(),
                 target.targetChipId(),
                 target.targetIndex(),
                 target.sliderTargetMm(),
@@ -711,35 +877,33 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         );
         pendingCaptureMotions.put(task.getTaskId(), pending);
 
-        ObjectNode motion = objectMapper.createObjectNode();
-        motion.put("type", "arm_position");
-        motion.put("source", "camera_capture");
-        motion.put("taskId", task.getTaskId());
-        motion.put("slider", target.sliderTargetMm());
-        boolean sent;
+        CollisionGuardSession guardSession;
         try {
-            sent = deviceSessionManager.sendToDevice(context.sliderLampChipId(), motion.toString());
+            guardSession = prepareCollisionGuards(context.config(), motionPlan, task.getTaskId());
+            retainCollisionGuards(task.getTaskId(), guardSession);
         } catch (RuntimeException e) {
-            log.warn("batch slider command failed, batchId={}, taskId={}",
-                    context.batch().getBatchId(), task.getTaskId(), e);
-            sent = false;
-        }
-        if (!sent) {
             pendingCaptureMotions.remove(task.getTaskId(), pending);
-            failBatchPhysicalTask(task, "motion_command_failed", "slider command send failed");
-            return;
-        }
-        try {
-            beginSliderMotion(sliderLamp, motionPlan);
-        } catch (RuntimeException e) {
-            log.warn("batch slider state save failed, batchId={}, taskId={}",
-                    context.batch().getBatchId(), task.getTaskId(), e);
-            pendingCaptureMotions.remove(task.getTaskId(), pending);
-            failBatchPhysicalTask(task, "motion_state_failed", "slider position state save failed");
+            failBatchPhysicalTask(task, "collision_guard_failed", e.getMessage());
             return;
         }
         webSocketPushService.pushCamCaptureTask(task, context.storeId());
-        scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
+        Runnable dispatch = () -> {
+            try {
+                sendSliderMotionCommand(context.sliderLampChipId(), target.sliderTargetMm(),
+                        "camera_capture", task.getTaskId());
+                beginSliderMotion(sliderLamp, motionPlan);
+                scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
+            } catch (RuntimeException e) {
+                releaseRetainedCollisionGuards(task.getTaskId());
+                pendingCaptureMotions.remove(task.getTaskId(), pending);
+                failBatchPhysicalTask(task, "motion_command_failed", e.getMessage());
+            }
+        };
+        if (guardSession.parkDelayMs() > 0L) {
+            captureTimeoutExecutor.schedule(dispatch, guardSession.parkDelayMs(), TimeUnit.MILLISECONDS);
+        } else {
+            dispatch.run();
+        }
     }
 
     private void advanceCaptureBatch(DeviceCamCaptureTaskRespVO completedTask) {
@@ -788,64 +952,65 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             if (!"running".equals(batch.getStatus())) {
                 return;
             }
-            batch.setStatus("returning_target_2");
-            batch.setMessage("all photos received; returning to target 2");
+            batch.setStatus("returning_standby");
+            batch.setMessage("all photos received; returning to standby position");
         }
 
         PendingBatchReturn pending = new PendingBatchReturn(
                 context.sliderLampChipId(),
-                context.targetTwo().sliderTargetMm(),
+                context.standbySliderMm(),
                 context.storeId()
         );
         pendingBatchReturns.put(batch.getBatchId(), pending);
         webSocketPushService.pushCamStatus(Map.of(
                 "camChipId", batch.getCamChipId(),
-                "workStatus", "returning_target_2",
+                "workStatus", "returning_standby",
                 "batchId", batch.getBatchId(),
-                "message", "三张图片已收到，滑轨返回区域 2"
+                "message", "三张图片已收到，滑轨返回安全待机位"
         ), context.storeId());
 
-        ObjectNode motion = objectMapper.createObjectNode();
-        motion.put("type", "arm_position");
-        motion.put("source", "camera_batch_return");
-        motion.put("taskId", batch.getBatchId());
-        motion.put("slider", context.targetTwo().sliderTargetMm());
         DeviceDO sliderLamp = requireLampLike(context.sliderLampChipId());
         TimedSliderMotion motionPlan;
         try {
+            DeviceCamCaptureTaskRespVO finalTask = context.batch().getTasks()
+                    .get(context.batch().getTasks().size() - 1);
             motionPlan = planSliderMotion(
                     context.config(),
-                    context.targetTwo().targetIndex(),
+                    finalTask.getTargetIndex(),
                     sliderLamp,
-                    context.targetTwo().sliderTargetMm()
+                    context.standbySliderMm()
             );
         } catch (RuntimeException e) {
             log.warn("batch return motion planning failed, batchId={}", batch.getBatchId(), e);
             pendingBatchReturns.remove(batch.getBatchId(), pending);
-            finishCaptureBatch(context, "return_failed", "failed to plan return to target 2", "error");
+            finishCaptureBatch(context, "return_failed", "failed to plan return to standby position", "error");
             return;
         }
-        boolean sent;
+        CollisionGuardSession guardSession;
         try {
-            sent = deviceSessionManager.sendToDevice(context.sliderLampChipId(), motion.toString());
+            guardSession = prepareCollisionGuards(context.config(), motionPlan, batch.getBatchId());
+            retainCollisionGuards(batch.getBatchId(), guardSession);
         } catch (RuntimeException e) {
-            log.warn("batch return command failed, batchId={}", batch.getBatchId(), e);
-            sent = false;
-        }
-        if (!sent) {
             pendingBatchReturns.remove(batch.getBatchId(), pending);
-            finishCaptureBatch(context, "return_failed", "failed to return to target 2", "error");
+            finishCaptureBatch(context, "return_failed", e.getMessage(), "error");
             return;
         }
-        try {
-            beginSliderMotion(sliderLamp, motionPlan);
-        } catch (RuntimeException e) {
-            log.warn("batch return slider state save failed, batchId={}", batch.getBatchId(), e);
-            pendingBatchReturns.remove(batch.getBatchId(), pending);
-            finishCaptureBatch(context, "return_failed", "failed to save slider return state", "error");
-            return;
+        Runnable dispatch = () -> {
+            try {
+                sendSliderMotionCommand(context.sliderLampChipId(), context.standbySliderMm(),
+                        "camera_batch_return", batch.getBatchId());
+                beginSliderMotion(sliderLamp, motionPlan);
+                scheduleTimedBatchReturn(batch.getBatchId(), motionPlan.delayMs());
+            } catch (RuntimeException e) {
+                pendingBatchReturns.remove(batch.getBatchId(), pending);
+                finishCaptureBatch(context, "return_failed", e.getMessage(), "error");
+            }
+        };
+        if (guardSession.parkDelayMs() > 0L) {
+            captureTimeoutExecutor.schedule(dispatch, guardSession.parkDelayMs(), TimeUnit.MILLISECONDS);
+        } else {
+            dispatch.run();
         }
-        scheduleTimedBatchReturn(batch.getBatchId(), motionPlan.delayMs());
     }
 
     private void finishCaptureBatch(
@@ -862,6 +1027,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             batch.setMessage(message);
         }
         pendingBatchReturns.remove(batch.getBatchId());
+        releaseBatchCollisionGuards(context);
         releaseCaptureSlots(batch.getBatchId(), batch.getCamChipId());
         webSocketPushService.pushCamStatus(Map.of(
                 "camChipId", batch.getCamChipId(),
@@ -921,10 +1087,84 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (notBlank(task.getBatchId())) {
             advanceCaptureBatch(task);
         } else {
-            releaseCaptureSlots(task);
+            startSingleCaptureReturn(task, cam);
         }
         enqueueCaptureAi(task, cam.getStoreId(), storedPath, originalFilename, contentType);
         return receivedSnapshot;
+    }
+
+    private void startSingleCaptureReturn(DeviceCamCaptureTaskRespVO task, DeviceDO cam) {
+        String taskId = task.getTaskId();
+        PendingSingleReturn pending;
+        DeviceDO sliderLamp;
+        DeviceCamRoiConfigVO config;
+        TimedSliderMotion motionPlan;
+        CollisionGuardSession guardSession;
+        try {
+            config = readRoiConfig(cam.getChipId());
+            String sliderLampChipId = captureSliderLampByTask.get(taskId);
+            if (!notBlank(sliderLampChipId)) {
+                throw new ServiceException("单点拍照滑轨占用信息已丢失");
+            }
+            sliderLamp = requireLampLike(sliderLampChipId);
+            double standbySliderMm = resolveSingleReturnSliderPreset(config, task.getTargetIndex());
+            motionPlan = planSliderMotion(config, task.getTargetIndex(), sliderLamp, standbySliderMm);
+            pending = new PendingSingleReturn(
+                    cam.getChipId(), sliderLamp.getChipId(), standbySliderMm, cam.getStoreId());
+            pendingSingleReturns.put(taskId, pending);
+            guardSession = prepareCollisionGuards(config, motionPlan, taskId);
+            retainCollisionGuards(taskId, guardSession);
+        } catch (RuntimeException e) {
+            failSingleCaptureReturn(task, cam, null, e.getMessage());
+            return;
+        }
+
+        webSocketPushService.pushCamStatus(Map.of(
+                "camChipId", cam.getChipId(),
+                "workStatus", "returning_standby",
+                "taskId", taskId,
+                "targetIndex", task.getTargetIndex(),
+                "message", "单点拍照完成，滑轨返回安全待机位"
+        ), cam.getStoreId());
+
+        Runnable dispatch = () -> {
+            try {
+                sendSliderMotionCommand(pending.sliderLampChipId(), pending.targetMm(),
+                        "camera_single_return", taskId);
+                beginSliderMotion(sliderLamp, motionPlan);
+                scheduleTimedSingleReturn(taskId, motionPlan.delayMs());
+            } catch (RuntimeException e) {
+                failSingleCaptureReturn(task, cam, pending, e.getMessage());
+            }
+        };
+        if (guardSession.parkDelayMs() > 0L) {
+            captureTimeoutExecutor.schedule(dispatch, guardSession.parkDelayMs(), TimeUnit.MILLISECONDS);
+        } else {
+            dispatch.run();
+        }
+    }
+
+    private void failSingleCaptureReturn(
+            DeviceCamCaptureTaskRespVO task, DeviceDO cam, PendingSingleReturn pending, String reason) {
+        if (pending == null) {
+            pendingSingleReturns.remove(task.getTaskId());
+        } else {
+            pendingSingleReturns.remove(task.getTaskId(), pending);
+        }
+        releaseRetainedCollisionGuards(task.getTaskId());
+        releaseCaptureSlots(task);
+        String detail = notBlank(reason) ? reason : "未知错误";
+        try {
+            webSocketPushService.pushCamStatus(Map.of(
+                    "camChipId", cam.getChipId(),
+                    "workStatus", "error",
+                    "taskId", task.getTaskId(),
+                    "targetIndex", task.getTargetIndex(),
+                    "message", "照片已保存，但滑轨返回安全待机位失败：" + detail
+            ), cam.getStoreId());
+        } catch (RuntimeException e) {
+            log.warn("single capture return failure push failed, taskId={}", task.getTaskId(), e);
+        }
     }
 
     private void enqueueCaptureAi(
@@ -1015,7 +1255,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 "upload_failed",
                 "photo_saved_ai_failed",
                 "camera_offline",
-                "camera_command_failed"
+                "camera_command_failed",
+                "capture_controller_offline",
+                "capture_controller_command_failed"
         );
         boolean failed = Set.of("return_failed", "error", "cancelled")
                 .contains(defaultStatus(batch.getStatus(), ""))
@@ -1066,6 +1308,10 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     @Override
     public void uploadFlowPhoto(String camChipId, Integer personCount, Double confidence, String detectTime, MultipartFile file) {
         DeviceDO cam = requireCam(camChipId);
+        if (personCount == null) {
+            aiService.personDetect(cam.getChipId(), file);
+            return;
+        }
         String imageName = saveUpload(file, "flow", cam.getChipId());
         saveFlowRecordIfNeeded(cam, personCount, confidence, detectTime, imageName);
     }
@@ -1094,11 +1340,34 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     @Override
-    public void uploadFlowPhotoByDevice(String camChipId, String token, Integer personCount, Double confidence, String detectTime, MultipartFile file) {
-        if (!deviceSessionManager.validateUploadToken(camChipId, token)) {
+    public void uploadFlowPhotoByDevice(
+            String camChipId,
+            String captureControllerChipId,
+            String token,
+            Integer personCount,
+            Double confidence,
+            String detectTime,
+            MultipartFile file) {
+        String tokenOwnerChipId = notBlank(captureControllerChipId)
+                ? captureControllerChipId.trim()
+                : camChipId;
+        if (!deviceSessionManager.validateUploadToken(tokenOwnerChipId, token)) {
             throw new ServiceException("cam flow upload token invalid");
         }
+        if (notBlank(captureControllerChipId)) {
+            requireBoundCaptureController(camChipId, captureControllerChipId);
+        }
         uploadFlowPhoto(camChipId, personCount, confidence, detectTime, file);
+    }
+
+    private void requireBoundCaptureController(String camChipId, String captureControllerChipId) {
+        DeviceDO cam = requireCam(camChipId);
+        DeviceDO captureController = requireCaptureController(captureControllerChipId);
+        requireSameStore(cam, captureController);
+        DeviceCamRoiConfigVO config = readRoiConfig(cam.getChipId());
+        if (!sameChipId(config.getCaptureControllerChipId(), captureController.getChipId())) {
+            throw new ServiceException("拍照控制器未绑定到指定 cam");
+        }
     }
 
     @Override
@@ -1125,12 +1394,18 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         captureTimeoutExecutor.schedule(() -> finishTimedBatchReturn(batchId), delayMs, TimeUnit.MILLISECONDS);
     }
 
+    private void scheduleTimedSingleReturn(String taskId, long delayMs) {
+        captureTimeoutExecutor.schedule(() -> finishTimedSingleReturn(taskId), delayMs, TimeUnit.MILLISECONDS);
+    }
+
     private void scheduleTaskCleanup(String taskId) {
         // 任务终态后延迟 5 分钟清理，给前端足够时间查询状态
         captureTimeoutExecutor.schedule(() -> {
             DeviceCamCaptureTaskRespVO task = taskCache.remove(taskId);
             captureUploadTokens.remove(taskId);
             pendingCaptureMotions.remove(taskId);
+            pendingSingleReturns.remove(taskId);
+            releaseRetainedCollisionGuards(taskId);
             captureBatchByTask.remove(taskId);
             if (task != null) {
                 releaseCaptureSlots(task);
@@ -1141,8 +1416,13 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private void scheduleBatchCleanup(String batchId) {
         captureTimeoutExecutor.schedule(() -> {
             batchCache.remove(batchId);
-            batchContexts.remove(batchId);
+            CaptureBatchContext context = batchContexts.remove(batchId);
             pendingBatchReturns.remove(batchId);
+            if (context != null) {
+                releaseBatchCollisionGuards(context);
+            } else {
+                releaseRetainedCollisionGuards(batchId);
+            }
         }, 5, TimeUnit.MINUTES);
     }
 
@@ -1161,8 +1441,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         } catch (RuntimeException e) {
             log.warn("slider state completion failed, taskId={}", taskId, e);
         }
-        if (!deviceSessionManager.isOnline(pending.camChipId())) {
-            failCaptureTask(task, "camera_offline", "estimated slider time elapsed but camera is offline", pending.storeId());
+        if (!deviceSessionManager.isOnline(pending.captureControllerChipId())) {
+            failCaptureTask(task, "capture_controller_offline", "estimated slider time elapsed but capture controller is offline", pending.storeId());
             return;
         }
 
@@ -1170,23 +1450,69 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         capture.put("type", "cameraCapture");
         capture.put("taskId", taskId);
         capture.put("camChipId", pending.camChipId());
+        capture.put("captureControllerChipId", pending.captureControllerChipId());
         capture.put("targetChipId", pending.targetChipId());
         capture.put("targetIndex", pending.targetIndex());
+        capture.put("captureKind", "garment");
         capture.put("motionReady", true);
         capture.put("uploadUrl", "/device/cam/capture-task/" + taskId + "/photo");
         capture.put("uploadToken", pending.uploadToken());
+        ObjectNode capturePreset = capture.putObject("capturePreset");
+        capturePreset.put("pan", pending.capturePan());
+        capturePreset.put("tilt", pending.captureTilt());
+
+        log.info(
+                "sending camera capture command, taskId={}, batchId={}, camChipId={}, "
+                        + "captureControllerChipId={}, targetChipId={}, targetIndex={}, "
+                        + "captureKind=garment, pan={}, tilt={}",
+                taskId,
+                task.getBatchId(),
+                pending.camChipId(),
+                pending.captureControllerChipId(),
+                pending.targetChipId(),
+                pending.targetIndex(),
+                pending.capturePan(),
+                pending.captureTilt()
+        );
         boolean captureSent;
         try {
-            captureSent = deviceSessionManager.sendToDevice(pending.camChipId(), capture.toString());
+            captureSent = deviceSessionManager.sendToDevice(pending.captureControllerChipId(), capture.toString());
         } catch (RuntimeException e) {
-            log.warn("camera capture command send failed, taskId={}", taskId, e);
-            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
+            log.warn(
+                    "camera capture command send threw exception, taskId={}, captureControllerChipId={}, "
+                            + "targetIndex={}, pan={}, tilt={}",
+                    taskId,
+                    pending.captureControllerChipId(),
+                    pending.targetIndex(),
+                    pending.capturePan(),
+                    pending.captureTilt(),
+                    e
+            );
+            failCaptureTask(task, "capture_controller_command_failed", "capture controller command send failed", pending.storeId());
             return;
         }
         if (!captureSent) {
-            failCaptureTask(task, "camera_command_failed", "camera capture command send failed", pending.storeId());
+            log.warn(
+                    "camera capture command not delivered, taskId={}, captureControllerChipId={}, "
+                            + "targetIndex={}, pan={}, tilt={}",
+                    taskId,
+                    pending.captureControllerChipId(),
+                    pending.targetIndex(),
+                    pending.capturePan(),
+                    pending.captureTilt()
+            );
+            failCaptureTask(task, "capture_controller_command_failed", "capture controller command send failed", pending.storeId());
             return;
         }
+        log.info(
+                "camera capture command sent, taskId={}, captureControllerChipId={}, "
+                        + "targetIndex={}, pan={}, tilt={}",
+                taskId,
+                pending.captureControllerChipId(),
+                pending.targetIndex(),
+                pending.capturePan(),
+                pending.captureTilt()
+        );
 
         task.setStatus("capturing");
         task.setMessage("estimated slider time elapsed; capture command sent");
@@ -1208,6 +1534,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
         task.setStatus("timeout");
         task.setMessage("capture photo upload timeout");
+        releaseRetainedCollisionGuards(taskId);
         releaseCaptureSlots(task);
         scheduleTaskCleanup(taskId);
         try {
@@ -1228,7 +1555,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private void finishTimedBatchReturn(String batchId) {
         PendingBatchReturn pending = pendingBatchReturns.remove(batchId);
         CaptureBatchContext context = batchContexts.get(batchId);
-        if (pending == null || context == null || !"returning_target_2".equals(context.batch().getStatus())) {
+        if (pending == null || context == null || !"returning_standby".equals(context.batch().getStatus())) {
             return;
         }
         try {
@@ -1240,7 +1567,32 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         } catch (RuntimeException e) {
             log.warn("batch return slider state completion failed, batchId={}", batchId, e);
         }
-        finishCaptureBatch(context, "completed", "batch capture completed at target 2", "batch_complete");
+        finishCaptureBatch(context, "completed", "batch capture completed at standby position", "batch_complete");
+    }
+
+    private void finishTimedSingleReturn(String taskId) {
+        PendingSingleReturn pending = pendingSingleReturns.remove(taskId);
+        if (pending == null) {
+            return;
+        }
+        try {
+            sliderMotionStateService.completeMotion(
+                    pending.sliderLampChipId(), pending.storeId(), pending.targetMm());
+        } catch (RuntimeException e) {
+            log.warn("single capture return slider state completion failed, taskId={}", taskId, e);
+        }
+        releaseRetainedCollisionGuards(taskId);
+        releaseCaptureSlots(taskId, pending.camChipId());
+        try {
+            webSocketPushService.pushCamStatus(Map.of(
+                    "camChipId", pending.camChipId(),
+                    "workStatus", "capture_complete",
+                    "taskId", taskId,
+                    "message", "单点拍照完成，滑轨已回到安全待机位"
+            ), pending.storeId());
+        } catch (RuntimeException e) {
+            log.warn("single capture return completion push failed, taskId={}", taskId, e);
+        }
     }
 
     private void claimCaptureSlot(Map<String, String> slots, String chipId, String taskId, String message) {
@@ -1258,9 +1610,12 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     private boolean isCaptureOperationActive(String operationId) {
+        if (pendingSingleReturns.containsKey(operationId)) {
+            return true;
+        }
         DeviceCamCaptureBatchRespVO batch = batchCache.get(operationId);
         if (batch != null) {
-            return "running".equals(batch.getStatus()) || "returning_target_2".equals(batch.getStatus());
+            return "running".equals(batch.getStatus()) || "returning_standby".equals(batch.getStatus());
         }
         DeviceCamCaptureTaskRespVO task = taskCache.get(operationId);
         if (task == null) {
@@ -1274,6 +1629,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         taskCache.remove(task.getTaskId());
         captureUploadTokens.remove(task.getTaskId());
         pendingCaptureMotions.remove(task.getTaskId());
+        pendingSingleReturns.remove(task.getTaskId());
+        releaseRetainedCollisionGuards(task.getTaskId());
         releaseCaptureSlots(task);
     }
 
@@ -1283,12 +1640,18 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         pendingBatchReturns.remove(batchId);
         if (batch != null) {
             for (DeviceCamCaptureTaskRespVO task : batch.getTasks()) {
+                releaseRetainedCollisionGuards(task.getTaskId());
                 taskCache.remove(task.getTaskId());
                 captureUploadTokens.remove(task.getTaskId());
                 pendingCaptureMotions.remove(task.getTaskId());
                 captureBatchByTask.remove(task.getTaskId());
             }
+        } else if (context != null) {
+            for (DeviceCamCaptureTaskRespVO task : context.batch().getTasks()) {
+                releaseRetainedCollisionGuards(task.getTaskId());
+            }
         }
+        releaseRetainedCollisionGuards(batchId);
         String camChipId = batch != null
                 ? batch.getCamChipId()
                 : (context == null ? null : context.batch().getCamChipId());
@@ -1327,14 +1690,11 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (notBlank(sliderLampChipId)) {
             activeCaptureTaskBySliderLamp.remove(sliderLampChipId, operationId);
         }
-        activeCaptureTaskByCam.remove(camChipId, operationId);
-        if (notBlank(camChipId)) {
-            try {
-                evaluateTrackingForCam(camChipId);
-            } catch (RuntimeException e) {
-                log.warn("tracking reevaluation after capture release failed, camChipId={}", camChipId, e);
-            }
+        String captureControllerChipId = captureControllerByTask.remove(operationId);
+        if (notBlank(captureControllerChipId)) {
+            activeCaptureTaskByCaptureController.remove(captureControllerChipId, operationId);
         }
+        activeCaptureTaskByCam.remove(camChipId, operationId);
     }
 
     private void failCaptureTask(DeviceCamCaptureTaskRespVO task, String status, String message, Long storeId) {
@@ -1346,6 +1706,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         task.setMessage(message);
         captureUploadTokens.remove(task.getTaskId());
         pendingCaptureMotions.remove(task.getTaskId());
+        pendingSingleReturns.remove(task.getTaskId());
+        releaseRetainedCollisionGuards(task.getTaskId());
         releaseCaptureSlots(task);
         webSocketPushService.pushCamCaptureResult(task, storeId);
         scheduleTaskCleanup(task.getTaskId());
@@ -1450,16 +1812,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (!online && notBlank(chipId)) {
             proximityStateCache.remove(chipId);
             List<String> affectedCams = new java.util.ArrayList<>();
-            pendingTrackingByCam.values().stream()
-                    .filter(pending -> sameChipId(chipId, pending.camChipId())
-                            || sameChipId(chipId, pending.lampChipId())
-                            || sameChipId(chipId, pending.sliderLampChipId()))
-                    .map(PendingTracking::camChipId)
-                    .forEach(affectedCams::add);
             activeTrackingByCam.values().stream()
                     .filter(session -> sameChipId(chipId, session.camChipId())
-                            || sameChipId(chipId, session.lampChipId())
-                            || sameChipId(chipId, session.sliderLampChipId()))
+                            || sameChipId(chipId, session.lampChipId()))
                     .map(TrackingSession::camChipId)
                     .forEach(affectedCams::add);
             affectedCams.stream().distinct().forEach(camChipId -> {
@@ -1529,16 +1884,11 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             String camChipId = notBlank(resp.getCamChipId()) ? resp.getCamChipId() :
                     ("cam".equals(resp.getRole()) ? resp.getChipId() : null);
             if (notBlank(camChipId)) {
-                PendingTracking pending = cancelPendingTracking(camChipId);
                 TrackingSession active = activeTrackingByCam.remove(camChipId);
                 String lampChipId = notBlank(resp.getLampChipId())
                         ? resp.getLampChipId()
-                        : active != null
-                                ? active.lampChipId()
-                                : pending == null ? null : pending.lampChipId();
-                TrackingSource source = active != null
-                        ? active.source()
-                        : pending == null ? null : pending.source();
+                        : active == null ? null : active.lampChipId();
+                TrackingSource source = active == null ? null : active.source();
                 String terminalStatus = defaultStatus(resp.getTrackingStatus(), "unknown")
                         .toLowerCase(Locale.ROOT);
                 clearClothTaken = Set.of("lost", "timeout").contains(terminalStatus)
@@ -1559,14 +1909,36 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (notBlank(terminalCamChipId)) {
             String terminalStatus = defaultStatus(resp.getTrackingStatus(), "unknown")
                     .toLowerCase(Locale.ROOT);
+            String terminalReason = "tracking " + terminalStatus;
             sendLampTrackingStop(
                     terminalLampChipId,
                     terminalCamChipId,
-                    "tracking " + terminalStatus,
+                    terminalReason,
                     clearClothTaken
             );
             if (clearClothTaken) {
                 clearLampTakenState(terminalLampChipId, device.getStoreId());
+            }
+            if (Set.of("lost", "timeout", "error").contains(terminalStatus)) {
+                DeviceDO cam = requireCam(terminalCamChipId);
+                if (deviceSessionManager.isOnline(cam.getChipId())) {
+                    sendCameraReturnCenter(cam, terminalReason);
+                }
+
+                TrackingCandidate stopped = new TrackingCandidate();
+                stopped.camChipId = cam.getChipId();
+                stopped.lampChipId = terminalLampChipId;
+                stopped.targetIndex = resp.getTargetIndex();
+                stopped.confidence = resp.getConfidence();
+                pushTracking(stopped, "stopped", terminalReason, cam.getStoreId());
+
+                DeviceCamStatusRespVO returning = new DeviceCamStatusRespVO();
+                returning.setCamChipId(cam.getChipId());
+                returning.setWorkStatus("returning_center");
+                returning.setMessage(terminalReason);
+                returning.setUpdateTime(LocalDateTime.now());
+                statusCache.put(cam.getChipId(), returning);
+                webSocketPushService.pushCamStatus(returning, cam.getStoreId());
             }
         }
         return resp;
@@ -1585,6 +1957,32 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         cleared.setUpdateTime(LocalDateTime.now());
         clothStateCache.put(lampChipId, cleared);
         webSocketPushService.pushLampClothState(cleared, storeId);
+    }
+
+    private void recoverTrackingCacheFromCamStatus(DeviceDO cam, DeviceCamStatusRespVO status) {
+        String workStatus = defaultStatus(status.getWorkStatus(), "unknown")
+                .toLowerCase(Locale.ROOT);
+        if (!Set.of("monitoring", "presence").contains(workStatus)) {
+            return;
+        }
+
+        DeviceTrackingStatusRespVO previous = trackingCache.get(cam.getChipId());
+        if (previous == null || !isTerminalTrackingStatus(previous.getTrackingStatus())) {
+            return;
+        }
+
+        activeTrackingByCam.remove(cam.getChipId());
+        TrackingCandidate recovered = new TrackingCandidate();
+        recovered.camChipId = cam.getChipId();
+        recovered.lampChipId = previous.getLampChipId();
+        recovered.targetIndex = previous.getTargetIndex();
+        recovered.confidence = previous.getConfidence();
+        pushTracking(
+                recovered,
+                "monitoring",
+                defaultStatus(status.getMessage(), "camera monitoring resumed"),
+                cam.getStoreId()
+        );
     }
 
     private DeviceCamPresenceRespVO emptyPresence(String camChipId) {
@@ -1684,7 +2082,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return;
         }
 
-        startTrackingIfNeeded(candidate, config);
+        startTrackingIfNeeded(candidate);
     }
 
     private TrackingCandidate toTrackingCandidate(String camChipId, DeviceCamPresenceReqVO.PresenceArea area, DeviceCamRoiConfigVO config) {
@@ -1732,10 +2130,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return clothState != null && "taken".equals(defaultStatus(clothState.getClothState(), "unknown"));
     }
 
-    private void startTrackingIfNeeded(TrackingCandidate candidate, DeviceCamRoiConfigVO config) {
+    private void startTrackingIfNeeded(TrackingCandidate candidate) {
         startTrackingIfNeeded(
                 candidate,
-                config,
                 TrackingSource.AUTO_TOF,
                 "presence + cloth taken, tracking started"
         );
@@ -1743,7 +2140,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
     private void startTrackingIfNeeded(
             TrackingCandidate candidate,
-            DeviceCamRoiConfigVO config,
             TrackingSource source,
             String successMessage) {
         DeviceDO cam = requireCam(candidate.camChipId);
@@ -1766,207 +2162,40 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             pushTracking(candidate, "tracking", "tracking condition still active", cam.getStoreId());
             return;
         }
-        PendingTracking existingPending = pendingTrackingByCam.get(candidate.camChipId);
-        if (existingPending != null) {
-            if (requestedKey.equals(existingPending.trackingKey())) {
-                pushTracking(candidate, "waiting_motion", "waiting for slider alignment", cam.getStoreId());
-            }
-            return;
+        if (active != null) {
+            stopTrackingIfActive(candidate.camChipId, "tracking target changed");
         }
-
-        DeviceDO sliderLamp;
-        try {
-            sliderLamp = requireSliderLamp(config);
-        } catch (ServiceException e) {
-            stopTrackingIfActive(candidate.camChipId, "slider lamp is not configured");
-            pushTracking(candidate, "error", e.getMessage(), cam.getStoreId());
-            return;
-        }
-        if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
-            stopTrackingIfActive(candidate.camChipId, "slider lamp offline");
-            pushTracking(candidate, "error", "滑轨控制灯离线", cam.getStoreId());
-            return;
-        }
-
-        if (isCaptureSlotBusy(activeCaptureTaskByCam, cam.getChipId())
-                || isCaptureSlotBusy(activeCaptureTaskBySliderLamp, sliderLamp.getChipId())) {
-            if (source == TrackingSource.MANUAL) {
-                pushTracking(candidate, "error", "摄像头或滑轨正在执行拍摄任务", cam.getStoreId());
-            }
-            return;
-        }
-
-        double sliderTargetMm = resolveSliderPreset(config, candidate.targetIndex);
-        TimedSliderMotion motionPlan;
-        try {
-            motionPlan = planSliderMotion(config, candidate.targetIndex, sliderLamp, sliderTargetMm);
-        } catch (RuntimeException e) {
-            pushTracking(candidate, "error", e.getMessage(), cam.getStoreId());
-            return;
-        }
-
-        PendingTracking pending = new PendingTracking(
-                UUID.randomUUID().toString(),
+        String camCommand = buildCameraStartTrackingCommand(
                 cam.getChipId(),
                 lamp.getChipId(),
-                sliderLamp.getChipId(),
                 candidate.targetIndex,
-                candidate.confidence,
-                lampIp,
-                cam.getStoreId(),
-                source,
-                successMessage,
-                motionPlan
+                lampIp
         );
-        String claimedBy = pendingTrackingBySliderLamp.putIfAbsent(sliderLamp.getChipId(), pending.id());
-        if (claimedBy != null) {
-            if (source == TrackingSource.MANUAL) {
-                pushTracking(candidate, "error", "滑轨已有追踪对位任务", cam.getStoreId());
-            }
+        if (!sendLampTrackingStart(lamp.getChipId(), cam.getChipId(), candidate.targetIndex)) {
+            pushTracking(candidate, "error", "lamp tracking lock command send failed", cam.getStoreId());
             return;
         }
-        if (pendingTrackingByCam.putIfAbsent(cam.getChipId(), pending) != null) {
-            pendingTrackingBySliderLamp.remove(sliderLamp.getChipId(), pending.id());
-            return;
-        }
-
-        if (!sendSliderPositionToLamp(sliderLamp.getChipId(), sliderTargetMm, "camera_tracking")) {
-            removePendingTracking(pending);
-            pushTracking(candidate, "error", "slider command send failed", cam.getStoreId());
-            return;
-        }
-        try {
-            beginSliderMotion(sliderLamp, motionPlan);
-        } catch (RuntimeException e) {
-            removePendingTracking(pending);
-            log.warn("tracking slider motion state save failed, camChipId={}, lampChipId={}",
-                    cam.getChipId(), sliderLamp.getChipId(), e);
-            pushTracking(candidate, "error", "slider position state save failed", cam.getStoreId());
-            return;
-        }
-
-        pushTracking(candidate, "waiting_motion", "waiting for slider alignment", cam.getStoreId());
-        long delayMs = TrackingStartDelayPolicy.delayMs(motionPlan.delayMs());
-        captureTimeoutExecutor.schedule(
-                () -> triggerPendingTracking(cam.getChipId(), pending.id()),
-                delayMs,
-                TimeUnit.MILLISECONDS
-        );
-    }
-
-    void triggerPendingTracking(String camChipId) {
-        PendingTracking pending = pendingTrackingByCam.get(camChipId);
-        if (pending != null) {
-            triggerPendingTracking(camChipId, pending.id());
-        }
-    }
-
-    private void triggerPendingTracking(String camChipId, String pendingId) {
-        PendingTracking pending = pendingTrackingByCam.get(camChipId);
-        if (pending == null || !pending.id().equals(pendingId)) {
-            return;
-        }
-        removePendingTracking(pending);
-
-        TrackingCandidate candidate = trackingCandidate(
-                pending.camChipId(),
-                pending.lampChipId(),
-                pending.targetIndex()
-        );
-        candidate.confidence = pending.confidence();
-
-        try {
-            DeviceDO sliderLamp = requireLampLike(pending.sliderLampChipId());
-            sliderMotionStateService.completeMotion(
-                    sliderLamp.getChipId(),
-                    sliderLamp.getStoreId(),
-                    pending.motionPlan().targetPositionMm()
+        if (!deviceSessionManager.sendToDevice(cam.getChipId(), camCommand)) {
+            sendLampTrackingStop(
+                    lamp.getChipId(),
+                    cam.getChipId(),
+                    "camera tracking command send failed",
+                    source == TrackingSource.AUTO_TOF
             );
-        } catch (RuntimeException e) {
-            log.warn("tracking slider state completion failed, camChipId={}, sliderLampChipId={}",
-                    pending.camChipId(), pending.sliderLampChipId(), e);
-        }
-
-        if (!deviceSessionManager.isOnline(pending.camChipId())
-                || !deviceSessionManager.isOnline(pending.lampChipId())
-                || !deviceSessionManager.isOnline(pending.sliderLampChipId())) {
-            failPendingTracking(candidate, pending, "cam or lamp offline before tracking start");
-            return;
-        }
-        if (isCaptureSlotBusy(activeCaptureTaskByCam, pending.camChipId())
-                || isCaptureSlotBusy(activeCaptureTaskBySliderLamp, pending.sliderLampChipId())) {
-            failPendingTracking(candidate, pending, "capture task occupied camera or slider");
+            if (source == TrackingSource.AUTO_TOF) {
+                clearLampTakenState(lamp.getChipId(), cam.getStoreId());
+            }
+            pushTracking(candidate, "error", "camera tracking command send failed", cam.getStoreId());
             return;
         }
 
-        String camCommand = buildCameraStartTrackingCommand(
-                pending.camChipId(),
-                pending.lampChipId(),
-                pending.targetIndex(),
-                pending.lampIp()
-        );
-        if (!sendLampTrackingStart(pending.lampChipId(), pending.camChipId(), pending.targetIndex())) {
-            failPendingTracking(candidate, pending, "lamp tracking lock command send failed");
-            return;
-        }
-        if (!deviceSessionManager.sendToDevice(pending.camChipId(), camCommand)) {
-            failPendingTracking(candidate, pending, "camera tracking command send failed");
-            return;
-        }
-
-        activeTrackingByCam.put(pending.camChipId(), new TrackingSession(
-                pending.camChipId(),
-                pending.lampChipId(),
-                pending.sliderLampChipId(),
-                pending.targetIndex(),
-                pending.source()
+        activeTrackingByCam.put(cam.getChipId(), new TrackingSession(
+                cam.getChipId(),
+                lamp.getChipId(),
+                candidate.targetIndex,
+                source
         ));
-        pushTracking(candidate, "tracking", pending.successMessage(), pending.storeId());
-    }
-
-    private void failPendingTracking(
-            TrackingCandidate candidate,
-            PendingTracking pending,
-            String message) {
-        sendLampTrackingStop(
-                pending.lampChipId(),
-                pending.camChipId(),
-                message,
-                pending.source() == TrackingSource.AUTO_TOF
-        );
-        if (pending.source() == TrackingSource.AUTO_TOF) {
-            clearLampTakenState(pending.lampChipId(), pending.storeId());
-        }
-        pushTracking(candidate, "error", message, pending.storeId());
-    }
-
-    private void removePendingTracking(PendingTracking pending) {
-        pendingTrackingByCam.remove(pending.camChipId(), pending);
-        pendingTrackingBySliderLamp.remove(pending.sliderLampChipId(), pending.id());
-    }
-
-    private PendingTracking cancelPendingTracking(String camChipId) {
-        PendingTracking pending = pendingTrackingByCam.remove(camChipId);
-        if (pending != null) {
-            pendingTrackingBySliderLamp.remove(pending.sliderLampChipId(), pending.id());
-        }
-        return pending;
-    }
-
-    private boolean isCaptureSlotBusy(Map<String, String> slots, String chipId) {
-        String operationId = slots.get(chipId);
-        return notBlank(operationId) && isCaptureOperationActive(operationId);
-    }
-
-    private void requireTrackingSlotsAvailable(String camChipId, String sliderLampChipId) {
-        if (pendingTrackingByCam.containsKey(camChipId) || activeTrackingByCam.containsKey(camChipId)) {
-            throw new ServiceException("摄像头正在执行追踪任务");
-        }
-        if (pendingTrackingBySliderLamp.containsKey(sliderLampChipId)
-                || activeTrackingByCam.values().stream()
-                        .anyMatch(session -> sameChipId(session.sliderLampChipId(), sliderLampChipId))) {
-            throw new ServiceException("滑轨控制灯正在执行追踪任务");
-        }
+        pushTracking(candidate, "tracking", successMessage, cam.getStoreId());
     }
 
     String buildCameraStartTrackingCommand(
@@ -1988,12 +2217,98 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return command.toString();
     }
 
-    private boolean sendSliderPositionToLamp(String lampChipId, double sliderTargetMm, String source) {
-        ObjectNode command = objectMapper.createObjectNode();
-        command.put("type", "arm_position");
-        command.put("source", source);
-        command.put("slider", sliderTargetMm);
-        return deviceSessionManager.sendToDevice(lampChipId, command.toString());
+    private CollisionGuardSession prepareCollisionGuards(
+            DeviceCamRoiConfigVO config, TimedSliderMotion motionPlan, String operationId) {
+        SliderCollisionPlanner.CollisionPlan plan = SliderCollisionPlanner.plan(
+                motionPlan.currentPositionMm(), motionPlan.targetPositionMm(),
+                config.getRois(), config.getSliderPresets());
+        if (plan.lamps().isEmpty()) return new CollisionGuardSession(operationId, List.of(), 0L);
+        java.util.ArrayList<String> parked = new java.util.ArrayList<>();
+        CollisionGuardSession session = new CollisionGuardSession(
+                operationId,
+                plan.lamps().stream().map(SliderCollisionPlanner.GuardedLamp::chipId).toList(),
+                plan.parkDelayMs());
+        try {
+            for (SliderCollisionPlanner.GuardedLamp lamp : plan.lamps()) {
+                if (!deviceSessionManager.isOnline(lamp.chipId())) {
+                    throw new ServiceException("碰撞避让灯离线：" + lamp.chipId());
+                }
+                ObjectNode command = objectMapper.createObjectNode();
+                command.put("type", "lampCollisionGuard");
+                command.put("action", "park");
+                command.put("guardId", operationId);
+                command.put("pan", 0D);
+                command.put("tilt", 0D);
+                command.put("estimatedParkTimeMs", lamp.parkTimeMs());
+                command.put("nanoFeedback", false);
+                if (!deviceSessionManager.sendToDevice(lamp.chipId(), command.toString())) {
+                    throw new ServiceException("碰撞避让指令发送失败：" + lamp.chipId());
+                }
+                parked.add(lamp.chipId());
+            }
+            return session;
+        } catch (RuntimeException exception) {
+            releaseCollisionGuards(new CollisionGuardSession(operationId, List.copyOf(parked), 0L));
+            throw exception;
+        }
+    }
+
+    private void sendSliderMotionCommand(String lampChipId, double targetMm, String source, String taskId) {
+        ObjectNode motion = objectMapper.createObjectNode();
+        motion.put("type", "arm_position");
+        motion.put("source", source);
+        motion.put("taskId", taskId);
+        motion.put("slider", targetMm);
+        if (!deviceSessionManager.sendToDevice(lampChipId, motion.toString())) {
+            throw new ServiceException("滑轨对位指令发送失败");
+        }
+    }
+
+    private void retainCollisionGuards(String operationId, CollisionGuardSession session) {
+        if (session.lampChipIds().isEmpty()) {
+            return;
+        }
+        retainedCaptureGuards.compute(operationId, (key, current) -> {
+            if (current == null) {
+                return session;
+            }
+            Set<String> lampChipIds = new HashSet<>(current.lampChipIds());
+            lampChipIds.addAll(session.lampChipIds());
+            return new CollisionGuardSession(
+                    operationId,
+                    List.copyOf(lampChipIds),
+                    Math.max(current.parkDelayMs(), session.parkDelayMs())
+            );
+        });
+    }
+
+    private void releaseRetainedCollisionGuards(String operationId) {
+        CollisionGuardSession session = retainedCaptureGuards.remove(operationId);
+        if (session != null) {
+            releaseCollisionGuards(session);
+        }
+    }
+
+    private void releaseBatchCollisionGuards(CaptureBatchContext context) {
+        for (DeviceCamCaptureTaskRespVO task : context.batch().getTasks()) {
+            releaseRetainedCollisionGuards(task.getTaskId());
+        }
+        releaseRetainedCollisionGuards(context.batch().getBatchId());
+    }
+
+    private void releaseCollisionGuards(CollisionGuardSession session) {
+        for (String lampChipId : session.lampChipIds()) {
+            try {
+                ObjectNode command = objectMapper.createObjectNode();
+                command.put("type", "lampCollisionGuard");
+                command.put("action", "release");
+                command.put("guardId", session.guardId());
+                deviceSessionManager.sendToDevice(lampChipId, command.toString());
+            } catch (RuntimeException exception) {
+                log.warn("collision guard release failed, guardId={}, lampChipId={}",
+                        session.guardId(), lampChipId, exception);
+            }
+        }
     }
 
     private DeviceDO requireSliderLampForCurrentStore(DeviceCamRoiConfigVO config) {
@@ -2011,15 +2326,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     private void stopTrackingIfActive(String camChipId, String reason) {
-        PendingTracking pending = cancelPendingTracking(camChipId);
         TrackingSession active = activeTrackingByCam.remove(camChipId);
-        if (active == null && pending == null) {
+        if (active == null) {
             return;
         }
 
-        String lampChipId = active != null ? active.lampChipId() : pending.lampChipId();
-        int targetIndex = active != null ? active.targetIndex() : pending.targetIndex();
-        TrackingSource source = active != null ? active.source() : pending.source();
+        String lampChipId = active.lampChipId();
+        int targetIndex = active.targetIndex();
+        TrackingSource source = active.source();
 
         DeviceDO cam = requireCam(camChipId);
         sendLampTrackingStop(
@@ -2171,28 +2485,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         MANUAL
     }
 
-    private record PendingTracking(
-            String id,
-            String camChipId,
-            String lampChipId,
-            String sliderLampChipId,
-            int targetIndex,
-            Double confidence,
-            String lampIp,
-            Long storeId,
-            TrackingSource source,
-            String successMessage,
-            TimedSliderMotion motionPlan
-    ) {
-        private String trackingKey() {
-            return lampChipId + "#" + targetIndex;
-        }
-    }
-
     private record TrackingSession(
             String camChipId,
             String lampChipId,
-            String sliderLampChipId,
             int targetIndex,
             TrackingSource source
     ) {
@@ -2204,6 +2499,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private record PendingCaptureMotion(
             String camChipId,
             String sliderLampChipId,
+            String captureControllerChipId,
+            double capturePan,
+            double captureTilt,
             String targetChipId,
             int targetIndex,
             double sliderTargetMm,
@@ -2223,8 +2521,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             double currentPositionMm,
             double targetPositionMm,
             String speedMode,
-            LocalDateTime startedAt,
-            LocalDateTime motionEndAt,
             long delayMs
     ) {
     }
@@ -2232,7 +2528,18 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private record SliderCalibration(double distanceMm, double timeSeconds) {
     }
 
+    private record CollisionGuardSession(String guardId, List<String> lampChipIds, long parkDelayMs) {
+    }
+
     private record PendingBatchReturn(
+            String sliderLampChipId,
+            double targetMm,
+            Long storeId
+    ) {
+    }
+
+    private record PendingSingleReturn(
+            String camChipId,
             String sliderLampChipId,
             double targetMm,
             Long storeId
@@ -2243,24 +2550,27 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         private final DeviceCamCaptureBatchRespVO batch;
         private final List<BatchCaptureTarget> targets;
         private final String sliderLampChipId;
+        private final String captureControllerChipId;
         private final Long storeId;
         private final DeviceCamRoiConfigVO config;
-        private final BatchCaptureTarget targetTwo;
+        private final double standbySliderMm;
         private int currentIndex = -1;
 
         private CaptureBatchContext(
                 DeviceCamCaptureBatchRespVO batch,
                 List<BatchCaptureTarget> targets,
                 String sliderLampChipId,
+                String captureControllerChipId,
                 Long storeId,
                 DeviceCamRoiConfigVO config,
-                BatchCaptureTarget targetTwo) {
+                double standbySliderMm) {
             this.batch = batch;
             this.targets = targets;
             this.sliderLampChipId = sliderLampChipId;
+            this.captureControllerChipId = captureControllerChipId;
             this.storeId = storeId;
             this.config = config;
-            this.targetTwo = targetTwo;
+            this.standbySliderMm = standbySliderMm;
         }
 
         private DeviceCamCaptureBatchRespVO batch() {
@@ -2275,6 +2585,10 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return sliderLampChipId;
         }
 
+        private String captureControllerChipId() {
+            return captureControllerChipId;
+        }
+
         private Long storeId() {
             return storeId;
         }
@@ -2283,8 +2597,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return config;
         }
 
-        private BatchCaptureTarget targetTwo() {
-            return targetTwo;
+        private double standbySliderMm() {
+            return standbySliderMm;
         }
 
         private int currentIndex() {
@@ -2367,9 +2681,29 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         value.setSliderLampChipId(notBlank(value.getSliderLampChipId())
                 ? value.getSliderLampChipId().trim()
                 : null);
-        if (value.getRois() == null) {
-            value.setRois(new java.util.ArrayList<>());
-        }
+        value.setCaptureControllerChipId(notBlank(value.getCaptureControllerChipId())
+                ? value.getCaptureControllerChipId().trim()
+                : null);
+        Double legacyCapturePan = value.getCapturePan();
+        Double legacyCaptureTilt = value.getCaptureTilt();
+        value.setGarmentCapturePan(clampDouble(
+                value.getGarmentCapturePan() != null ? value.getGarmentCapturePan() : legacyCapturePan,
+                0D, 180D, 90D
+        ));
+        value.setGarmentCaptureTilt(clampDouble(
+                value.getGarmentCaptureTilt() != null ? value.getGarmentCaptureTilt() : legacyCaptureTilt,
+                0D, 180D, 90D
+        ));
+        value.setPersonCapturePan(clampDouble(value.getPersonCapturePan(), 0D, 180D, 90D));
+        value.setPersonCaptureTilt(clampDouble(value.getPersonCaptureTilt(), 0D, 180D, 90D));
+        value.setFlowUploadEnabled(Boolean.TRUE.equals(value.getFlowUploadEnabled()));
+        int flowUploadIntervalSeconds = value.getFlowUploadIntervalSeconds() == null
+                ? 30
+                : value.getFlowUploadIntervalSeconds();
+        value.setFlowUploadIntervalSeconds(Math.max(5, Math.min(3600, flowUploadIntervalSeconds)));
+        value.setRois(value.getRois() == null
+                ? new java.util.ArrayList<>()
+                : new java.util.ArrayList<>(value.getRois()));
         value.getRois().sort(Comparator.comparing(item -> item.getTargetIndex() == null ? 99 : item.getTargetIndex()));
         for (DeviceCamRoiItemVO roi : value.getRois()) {
             roi.setTargetIndex(normalizeTargetIndex(roi.getTargetIndex()));
@@ -2377,6 +2711,21 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             roi.setY(clamp01(roi.getY()));
             roi.setW(clamp01(roi.getW()));
             roi.setH(clamp01(roi.getH()));
+            roi.setGarmentCapturePan(clampDouble(
+                    roi.getGarmentCapturePan(), 0D, 180D, value.getGarmentCapturePan()
+            ));
+            roi.setGarmentCaptureTilt(clampDouble(
+                    roi.getGarmentCaptureTilt(), 0D, 180D, value.getGarmentCaptureTilt()
+            ));
+            roi.setPersonCapturePan(clampDouble(
+                    roi.getPersonCapturePan(), 0D, 180D, value.getPersonCapturePan()
+            ));
+            roi.setPersonCaptureTilt(clampDouble(
+                    roi.getPersonCaptureTilt(), 0D, 180D, value.getPersonCaptureTilt()
+            ));
+            roi.setCollisionCenterMm(clampDouble(roi.getCollisionCenterMm(), 0D, 2500D, 0D));
+            roi.setCollisionClearanceMm(clampDouble(roi.getCollisionClearanceMm(), 0D, 2500D, 0D));
+            roi.setCollisionParkTimeSeconds(normalizeMoveTime(roi.getCollisionParkTimeSeconds()));
         }
         value.setSliderPresets(normalizeSliderPresetMap(value));
         value.setSliderMoveTimes(normalizeSliderMoveTimeMap(value));
@@ -2397,6 +2746,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             }
             normalized.put(key, (double) Math.round(clampDouble(slider, 0D, 2500D, 0D)));
         }
+        Double standby = config.getSliderPresets() == null ? null : config.getSliderPresets().get("standby");
+        normalized.put("standby", (double) Math.round(clampDouble(standby, 0D, 2500D, 0D)));
         return normalized;
     }
 
@@ -2412,6 +2763,12 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             output.setFast(normalizeMoveTime(input == null ? null : input.getFast()));
             normalized.put(key, output);
         }
+        DeviceCamSliderMoveTimeVO standbyInput = source == null ? null : source.get("standby");
+        DeviceCamSliderMoveTimeVO standbyOutput = new DeviceCamSliderMoveTimeVO();
+        standbyOutput.setSlow(normalizeMoveTime(standbyInput == null ? null : standbyInput.getSlow()));
+        standbyOutput.setNormal(normalizeMoveTime(standbyInput == null ? null : standbyInput.getNormal()));
+        standbyOutput.setFast(normalizeMoveTime(standbyInput == null ? null : standbyInput.getFast()));
+        normalized.put("standby", standbyOutput);
         return normalized;
     }
 
@@ -2427,6 +2784,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return null;
         }
         return presets.get(key).getSlider();
+    }
+
+    private DeviceCamRoiItemVO requireCaptureRoi(DeviceCamRoiConfigVO config, Integer targetIndex) {
+        int normalizedTargetIndex = normalizeTargetIndex(targetIndex);
+        return config.getRois().stream()
+                .filter(roi -> roi.getTargetIndex() != null && roi.getTargetIndex() == normalizedTargetIndex)
+                .findFirst()
+                .orElseThrow(() -> new ServiceException("区域 " + normalizedTargetIndex + " 拍摄角度未配置"));
     }
 
     private double resolveSliderPreset(DeviceCamRoiConfigVO config, Integer targetIndex) {
@@ -2586,6 +2951,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return device;
     }
 
+    private DeviceDO requireCaptureControllerForCurrentStore(String chipId) {
+        DeviceDO device = requireDeviceForCurrentStore(chipId);
+        if (!DeviceTypeUtil.isCaptureController(device.getDeviceType())) {
+            throw new ServiceException("拍照控制器必须是 cam_capture 设备");
+        }
+        return device;
+    }
+
     private DeviceDO requireDeviceForCurrentStore(String chipId) {
         DeviceDO device = requireDevice(chipId);
         Long storeId = currentStoreService.getCurrentStoreId();
@@ -2609,6 +2982,28 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             throw new ServiceException("设备不是 lamp/camlamp");
         }
         return device;
+    }
+
+    private DeviceDO requireCaptureController(String chipId) {
+        DeviceDO device = requireDevice(chipId);
+        if (!DeviceTypeUtil.isCaptureController(device.getDeviceType())) {
+            throw new ServiceException("设备不是 cam_capture");
+        }
+        return device;
+    }
+
+    private DeviceDO requireCaptureControllerForCurrentStore(DeviceCamRoiConfigVO config) {
+        if (config == null || !notBlank(config.getCaptureControllerChipId())) {
+            throw new ServiceException("拍照控制器未绑定，请先在 Camera 详情中选择 cam_capture 设备");
+        }
+        return requireCaptureControllerForCurrentStore(config.getCaptureControllerChipId());
+    }
+
+    private DeviceDO requireCaptureController(DeviceCamRoiConfigVO config) {
+        if (config == null || !notBlank(config.getCaptureControllerChipId())) {
+            throw new ServiceException("拍照控制器未绑定，请先在 Camera 详情中选择 cam_capture 设备");
+        }
+        return requireCaptureController(config.getCaptureControllerChipId());
     }
 
     private void requireSameStore(DeviceDO expectedStoreDevice, DeviceDO candidate) {

@@ -49,7 +49,7 @@ public class DeviceFleetLifecycleService {
         String type = DeviceTypeUtil.normalize(device.getDeviceType());
         return DeviceTypeUtil.LAMP.equals(type)
                 || DeviceTypeUtil.CAM.equals(type)
-                || DeviceTypeUtil.CAM_LAMP.equals(type);
+                || DeviceTypeUtil.CAM_LAMP.equals(type)
+                || DeviceTypeUtil.CAM_CAPTURE.equals(type);
     }
 }
-

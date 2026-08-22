@@ -27,6 +27,8 @@ public interface DeviceCamService {
 
     DeviceCamRoiConfigVO getRoiConfigForDevice(String camChipId);
 
+    void pushCaptureControllerConfigForDevice(String captureControllerChipId);
+
     DeviceCamRoiConfigVO saveRoiConfig(String camChipId, DeviceCamRoiConfigVO config);
 
     DeviceCamPresenceRespVO reportPresence(DeviceCamPresenceReqVO reqVO);
@@ -53,7 +55,15 @@ public interface DeviceCamService {
 
     void uploadFlowPhoto(String camChipId, Integer personCount, Double confidence, String detectTime, MultipartFile file);
 
-    void uploadFlowPhotoByDevice(String camChipId, String token, Integer personCount, Double confidence, String detectTime, MultipartFile file);
+    void uploadFlowPhotoByDevice(
+            String camChipId,
+            String captureControllerChipId,
+            String token,
+            Integer personCount,
+            Double confidence,
+            String detectTime,
+            MultipartFile file
+    );
 
     Resource loadUploadImage(String imageName);
 

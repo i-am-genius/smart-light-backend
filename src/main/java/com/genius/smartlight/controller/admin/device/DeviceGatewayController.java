@@ -55,6 +55,10 @@ public class DeviceGatewayController {
             "stop"
     );
 
+    private static final Set<String> CAPTURE_ARM_ACTIONS = Set.of(
+            "up", "down", "left", "right", "center", "home", "stop"
+    );
+
     private static final Set<String> ARM_SPEEDS = Set.of("slow", "normal", "fast");
     private static final Set<String> PTZ_AXES = Set.of("yaw", "pitch", "roll", "all");
     private static final Set<String> PTZ_DIRECTIONS = Set.of("left", "right", "up", "down", "cw", "ccw", "center");
@@ -62,6 +66,8 @@ public class DeviceGatewayController {
     private static final float ARM_PAN_MAX = 90f;
     private static final float ARM_TILT_MIN = -90f;
     private static final float ARM_TILT_MAX = 90f;
+    private static final float SG90_MIN = 0f;
+    private static final float SG90_MAX = 180f;
     private static final float CAM_PITCH_MIN = -90f;
     private static final float CAM_PITCH_MAX = 90f;
     private static final float SLIDER_MIN_MM = 0f;
@@ -127,12 +133,13 @@ public class DeviceGatewayController {
         return device;
     }
 
-    @Operation(summary = "控制 cam 摄像头三轴云台", description = "仅支持 deviceType=cam 的独立摄像头设备。下发 ptzControl 指令，不携带亮度、色温或自动模式字段。")
+    @Operation(summary = "控制摄像头设备三轴云台", description = "支持 deviceType=cam 或 cam_capture。下发 ptzControl 指令，不携带亮度、色温或自动模式字段。")
     @PostMapping("/cam/ptz")
     public CommonResult<Boolean> camPtzControl(@Valid @RequestBody DeviceCamPtzReqVO reqVO) {
         DeviceDO device = getDeviceByChipIdForCurrentStore(reqVO.getChipId());
-        if (!DeviceTypeUtil.isCam(device.getDeviceType())) {
-            throw new ServiceException("Only cam devices support this PTZ endpoint");
+        if (!DeviceTypeUtil.isCam(device.getDeviceType())
+                && !DeviceTypeUtil.isCaptureController(device.getDeviceType())) {
+            throw new ServiceException("Only cam or cam_capture devices support this PTZ endpoint");
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -217,7 +224,7 @@ public class DeviceGatewayController {
             case "arm_position": {
                 // 精确位置控制 — 透传，允许部分字段
                 payload.put("type", "arm_position");
-                validateArmPosition(reqVO);
+                validateArmPosition(deviceType, reqVO);
                 if (reqVO.getPan() != null) payload.put("pan", reqVO.getPan());
                 if (reqVO.getTilt() != null) payload.put("tilt", reqVO.getTilt());
                 if (reqVO.getSlider() != null) payload.put("slider", reqVO.getSlider());
@@ -247,8 +254,13 @@ public class DeviceGatewayController {
             }
         }
 
+        if ("arm_speed".equals(messageType)) {
+            rememberSliderControl(device, messageType, reqVO);
+        }
         sendToDevice(chipId, payload);
-        rememberSliderControl(device, messageType, reqVO);
+        if (!"arm_speed".equals(messageType)) {
+            rememberSliderControl(device, messageType, reqVO);
+        }
         return CommonResult.success(true);
     }
 
@@ -335,22 +347,38 @@ public class DeviceGatewayController {
 
     private String normalizeArmDeviceType(String value) {
         String deviceType = normalizeText(value);
-        if ("lamp".equals(deviceType) || "cam".equals(deviceType) || "camlamp".equals(deviceType)) {
+        if (DeviceTypeUtil.isCaptureController(deviceType)) {
+            return "cam_capture";
+        }
+        if ("lamp".equals(deviceType) || "cam".equals(deviceType)
+                || "camlamp".equals(deviceType)) {
             return deviceType;
         }
         throw new ServiceException("设备类型不支持云台控制");
     }
 
     private void validateArmAction(String deviceType, String action) {
-        Set<String> allowedActions = "lamp".equals(deviceType) ? LAMP_ARM_ACTIONS : CAM_ARM_ACTIONS;
+        Set<String> allowedActions;
+        if ("lamp".equals(deviceType)) {
+            allowedActions = LAMP_ARM_ACTIONS;
+        } else if ("cam_capture".equals(deviceType)) {
+            allowedActions = CAPTURE_ARM_ACTIONS;
+        } else {
+            allowedActions = CAM_ARM_ACTIONS;
+        }
         if (!allowedActions.contains(action)) {
             throw new ServiceException("当前设备类型不支持云台动作：" + action);
         }
     }
 
-    private void validateArmPosition(DeviceArmControlReqVO reqVO) {
-        validateRange("pan", reqVO.getPan(), ARM_PAN_MIN, ARM_PAN_MAX);
-        validateRange("tilt", reqVO.getTilt(), ARM_TILT_MIN, ARM_TILT_MAX);
+    private void validateArmPosition(String deviceType, DeviceArmControlReqVO reqVO) {
+        boolean sg90CaptureController = "cam_capture".equals(deviceType);
+        float panMin = sg90CaptureController ? SG90_MIN : ARM_PAN_MIN;
+        float panMax = sg90CaptureController ? SG90_MAX : ARM_PAN_MAX;
+        float tiltMin = sg90CaptureController ? SG90_MIN : ARM_TILT_MIN;
+        float tiltMax = sg90CaptureController ? SG90_MAX : ARM_TILT_MAX;
+        validateRange("pan", reqVO.getPan(), panMin, panMax);
+        validateRange("tilt", reqVO.getTilt(), tiltMin, tiltMax);
         validateSliderRange(reqVO.getSlider());
     }
 

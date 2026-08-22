@@ -26,6 +26,7 @@ class DeviceFleetLifecycleServiceTest {
         DeviceFleetLifecycleService service = new DeviceFleetLifecycleService(mapper, sessions, camService);
         List<DeviceDO> devices = List.of(
                 device("CAM-1", "cam"),
+                device("CAPTURE-1", "cam_capture"),
                 device("LAMP-1", "lamp"),
                 device("LAMP-2", "lamp")
         );
@@ -35,6 +36,8 @@ class DeviceFleetLifecycleServiceTest {
 
         service.onOnlineStatusChanged(1L);
         online.add("CAM-1");
+        service.onOnlineStatusChanged(1L);
+        online.add("CAPTURE-1");
         service.onOnlineStatusChanged(1L);
         online.add("LAMP-1");
         service.onOnlineStatusChanged(1L);
@@ -47,7 +50,7 @@ class DeviceFleetLifecycleServiceTest {
 
         online.clear();
         service.onOnlineStatusChanged(1L);
-        online.addAll(List.of("CAM-1", "LAMP-1", "LAMP-2"));
+        online.addAll(List.of("CAM-1", "CAPTURE-1", "LAMP-1", "LAMP-2"));
         service.onOnlineStatusChanged(1L);
 
         verify(camService, times(2)).resetAutomaticGarmentDetection(1L);

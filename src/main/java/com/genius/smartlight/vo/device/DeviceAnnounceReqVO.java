@@ -15,6 +15,6 @@ public class DeviceAnnounceReqVO {
     @Schema(description = "设备局域网 IP 地址", example = "192.168.1.10")
     private String ip;
 
-    @Schema(description = "设备类型：lamp、cam 或 camlamp", example = "lamp", allowableValues = {"lamp", "cam", "camlamp"})
+    @Schema(description = "设备类型：lamp、cam、camlamp 或 cam_capture", example = "lamp", allowableValues = {"lamp", "cam", "camlamp", "cam_capture"})
     private String deviceType;
 }

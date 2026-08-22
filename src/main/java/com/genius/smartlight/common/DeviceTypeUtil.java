@@ -10,6 +10,7 @@ public final class DeviceTypeUtil {
     public static final String LAMP = "lamp";
     public static final String CAM = "cam";
     public static final String CAM_LAMP = "camlamp";
+    public static final String CAM_CAPTURE = "cam_capture";
 
     private DeviceTypeUtil() {
     }
@@ -29,10 +30,10 @@ public final class DeviceTypeUtil {
      */
     public static String normalizeAndValidate(String deviceType) {
         String value = normalize(deviceType);
-        if (LAMP.equals(value) || CAM.equals(value) || CAM_LAMP.equals(value)) {
+        if (LAMP.equals(value) || CAM.equals(value) || CAM_LAMP.equals(value) || CAM_CAPTURE.equals(value)) {
             return value;
         }
-        throw new ServiceException("deviceType 只能是 lamp、cam 或 camlamp");
+        throw new ServiceException("deviceType 只能是 lamp、cam、camlamp 或 cam_capture");
     }
 
     /**
@@ -48,5 +49,12 @@ public final class DeviceTypeUtil {
      */
     public static boolean isCam(String deviceType) {
         return CAM.equals(normalize(deviceType));
+    }
+
+    /**
+     * 是否为专用拍照控制器设备。
+     */
+    public static boolean isCaptureController(String deviceType) {
+        return CAM_CAPTURE.equals(normalize(deviceType));
     }
 }

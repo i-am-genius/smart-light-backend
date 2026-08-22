@@ -124,6 +124,8 @@ class DeviceCamServiceImplTest {
                 .thenReturn(new SliderMotionStateService.SliderStateSnapshot(
                         0D, 0D, "normal", null, null
                 ));
+        when(sliderMotionStateService.requireConfirmedSpeedMode(any(String.class), any()))
+                .thenReturn("normal");
         writeDefaultCaptureConfig();
     }
 
@@ -804,14 +806,14 @@ class DeviceCamServiceImplTest {
             assertThat(upload.getStatus()).isEqualTo("image_received");
         }
 
-        assertThat(batch.getStatus()).isEqualTo("returning_target_2");
+        assertThat(batch.getStatus()).isEqualTo("returning_standby");
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(deviceSessionManager, times(4))
                 .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode returnMotion = objectMapper.readTree(payloadCaptor.getAllValues().get(3));
         assertThat(returnMotion.path("source").asText()).isEqualTo("camera_batch_return");
         assertThat(returnMotion.path("taskId").asText()).isEqualTo(batch.getBatchId());
-        assertThat(returnMotion.path("slider").asDouble()).isEqualTo(640.0);
+        assertThat(returnMotion.path("slider").asDouble()).isEqualTo(380.0);
         verify(deviceSessionManager, times(3)).sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-001"), any());
@@ -928,6 +930,7 @@ class DeviceCamServiceImplTest {
         roi.setY(0.1);
         roi.setW(0.3);
         roi.setH(0.3);
+        configureNonIntersectingCollisionZone(roi);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
@@ -964,6 +967,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiItemVO target = new DeviceCamRoiItemVO();
         target.setTargetIndex(targetIndex);
         target.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+        configureNonIntersectingCollisionZone(target);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
@@ -1006,6 +1010,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiItemVO target = new DeviceCamRoiItemVO();
         target.setTargetIndex(1);
         target.setTargetChipId("LAMP-001");
+        configureNonIntersectingCollisionZone(target);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
@@ -1033,12 +1038,15 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiItemVO target1 = new DeviceCamRoiItemVO();
         target1.setTargetIndex(1);
         target1.setTargetChipId("LAMP-001");
+        configureNonIntersectingCollisionZone(target1);
         DeviceCamRoiItemVO target2 = new DeviceCamRoiItemVO();
         target2.setTargetIndex(2);
         target2.setTargetChipId("LAMP-002");
+        configureNonIntersectingCollisionZone(target2);
         DeviceCamRoiItemVO target3 = new DeviceCamRoiItemVO();
         target3.setTargetIndex(3);
         target3.setTargetChipId("LAMP-003");
+        configureNonIntersectingCollisionZone(target3);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
@@ -1052,11 +1060,12 @@ class DeviceCamServiceImplTest {
         config.setFlowUploadIntervalSeconds(30);
         config.setConfigured(true);
         config.setRois(List.of(target1, target2, target3));
-        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));
+        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0, "standby", 380.0));
         Map<String, DeviceCamSliderMoveTimeVO> batchMoveTimes = new LinkedHashMap<>();
         batchMoveTimes.putAll(moveTimes(1));
         batchMoveTimes.putAll(moveTimes(2));
         batchMoveTimes.putAll(moveTimes(3));
+        batchMoveTimes.put("standby", moveTimeValue());
         config.setSliderMoveTimes(batchMoveTimes);
         objectMapper.writeValue(defaultConfigPath().toFile(), config);
 
@@ -1075,11 +1084,21 @@ class DeviceCamServiceImplTest {
     }
 
     private Map<String, DeviceCamSliderMoveTimeVO> moveTimes(int targetIndex) {
+        return Map.of(String.valueOf(targetIndex), moveTimeValue());
+    }
+
+    private DeviceCamSliderMoveTimeVO moveTimeValue() {
         DeviceCamSliderMoveTimeVO value = new DeviceCamSliderMoveTimeVO();
         value.setSlow(0.001D);
         value.setNormal(0.001D);
         value.setFast(0.001D);
-        return Map.of(String.valueOf(targetIndex), value);
+        return value;
+    }
+
+    private void configureNonIntersectingCollisionZone(DeviceCamRoiItemVO target) {
+        target.setCollisionCenterMm(2000D);
+        target.setCollisionClearanceMm(10D);
+        target.setCollisionParkTimeSeconds(0.001D);
     }
 
     private void awaitCameraCapture(String taskId) {
@@ -1132,3 +1151,4 @@ class DeviceCamServiceImplTest {
         doAnswer(answer).when(deviceMapper).selectOne(any(LambdaQueryWrapper.class), anyBoolean());
     }
 }
+

@@ -254,8 +254,13 @@ public class DeviceGatewayController {
             }
         }
 
+        if ("arm_speed".equals(messageType)) {
+            rememberSliderControl(device, messageType, reqVO);
+        }
         sendToDevice(chipId, payload);
-        rememberSliderControl(device, messageType, reqVO);
+        if (!"arm_speed".equals(messageType)) {
+            rememberSliderControl(device, messageType, reqVO);
+        }
         return CommonResult.success(true);
     }
 

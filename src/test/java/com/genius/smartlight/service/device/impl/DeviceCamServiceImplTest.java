@@ -353,7 +353,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void roiContract_usesSingleSliderPresetAndOmitsCameraPosePresets() throws Exception {
+    void roiContract_usesSharedCapturePoseAndSingleSliderPreset() throws Exception {
         DeviceCamRoiItemVO roi = new DeviceCamRoiItemVO();
         roi.setTargetIndex(1);
         roi.setTargetChipId("LAMP-001");
@@ -367,6 +367,8 @@ class DeviceCamServiceImplTest {
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
+        config.setCapturePan(-12D);
+        config.setCaptureTilt(240D);
         config.setRois(List.of(roi));
         config.setSliderPresets(Map.of("1", 320.0));
 
@@ -376,10 +378,12 @@ class DeviceCamServiceImplTest {
         assertThat(json).contains(
                 "\"sliderLampChipId\":\"" + SLIDER_LAMP_CHIP_ID + "\"",
                 "\"captureControllerChipId\":\"" + CAPTURE_CONTROLLER_CHIP_ID + "\"",
+                "\"capturePan\":0.0",
+                "\"captureTilt\":180.0",
                 "\"sliderPresets\":{\"1\":320.0}"
         );
         assertThat(json).doesNotContain(
-                "capturePresets", "trackingPresets", "pan", "tilt", "yaw", "pitch", "roll",
+                "capturePresets", "trackingPresets", "yaw", "pitch", "roll",
                 "centerPreset", "trackingLostTimeoutSeconds",
                 "dwellSeconds", "leaveDelaySeconds", "confidenceThreshold", "udpIp", "udpPort"
         );
@@ -410,6 +414,8 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO normalized = service.normalizeConfig("CAM-001", legacy);
         String json = mapper.writeValueAsString(normalized);
 
+        assertThat(normalized.getCapturePan()).isEqualTo(90.0);
+        assertThat(normalized.getCaptureTilt()).isEqualTo(90.0);
         assertThat(normalized.getSliderPresets().get("1")).isEqualTo(0.0);
         assertThat(json).doesNotContain(
                 "capturePresets", "trackingPresets", "pan", "tilt", "yaw", "pitch", "roll",
@@ -459,7 +465,8 @@ class DeviceCamServiceImplTest {
         assertThat(payload.path("camChipId").asText()).isEqualTo("CAM-001");
         assertThat(payload.path("captureControllerChipId").asText()).isEqualTo(CAPTURE_CONTROLLER_CHIP_ID);
         assertThat(payload.path("motionReady").asBoolean()).isTrue();
-        assertThat(payload.has("capturePreset")).isFalse();
+        assertThat(payload.path("capturePreset").path("pan").asDouble()).isEqualTo(120D);
+        assertThat(payload.path("capturePreset").path("tilt").asDouble()).isEqualTo(72D);
         assertThat(task.getStatus()).isEqualTo("capturing");
     }
 
@@ -829,6 +836,8 @@ class DeviceCamServiceImplTest {
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
+        config.setCapturePan(120D);
+        config.setCaptureTilt(72D);
         config.setRois(List.of(target));
         config.setSliderPresets(Map.of("1", 320.0));
         config.setSliderMoveTimes(moveTimes(1));
@@ -856,6 +865,8 @@ class DeviceCamServiceImplTest {
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
+        config.setCapturePan(120D);
+        config.setCaptureTilt(72D);
         config.setConfigured(true);
         config.setRois(List.of(target1, target2, target3));
         config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));

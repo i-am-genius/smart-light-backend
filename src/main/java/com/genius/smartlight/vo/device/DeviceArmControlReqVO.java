@@ -33,10 +33,10 @@ public class DeviceArmControlReqVO {
     private Integer durationMs;
 
     // === 精确位置控制字段 (type=arm_position) ===
-    @Schema(description = "水平角度，单位 °", example = "10")
+    @Schema(description = "水平角度，单位 °；cam_capture 的 SG90 使用 0~180、中位 90，其他设备使用 -90~90", example = "90")
     private Float pan;
 
-    @Schema(description = "俯仰角度，单位 °", example = "-5")
+    @Schema(description = "俯仰角度，单位 °；cam_capture 的 SG90 使用 0~180、中位 90，其他设备使用 -90~90", example = "90")
     private Float tilt;
 
     @Schema(description = "滑轨位置，单位 mm", example = "80")

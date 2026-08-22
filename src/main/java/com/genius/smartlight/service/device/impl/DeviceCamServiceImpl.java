@@ -442,6 +442,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 cam.getChipId(),
                 sliderLamp.getChipId(),
                 captureController.getChipId(),
+                config.getCapturePan(),
+                config.getCaptureTilt(),
                 target.getChipId(),
                 targetIndex,
                 sliderTargetMm,
@@ -740,6 +742,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 task.getCamChipId(),
                 context.sliderLampChipId(),
                 context.captureControllerChipId(),
+                context.config().getCapturePan(),
+                context.config().getCaptureTilt(),
                 target.targetChipId(),
                 target.targetIndex(),
                 target.sliderTargetMm(),
@@ -1215,6 +1219,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         capture.put("motionReady", true);
         capture.put("uploadUrl", "/device/cam/capture-task/" + taskId + "/photo");
         capture.put("uploadToken", pending.uploadToken());
+        ObjectNode capturePreset = capture.putObject("capturePreset");
+        capturePreset.put("pan", pending.capturePan());
+        capturePreset.put("tilt", pending.captureTilt());
         boolean captureSent;
         try {
             captureSent = deviceSessionManager.sendToDevice(pending.captureControllerChipId(), capture.toString());
@@ -2249,6 +2256,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             String camChipId,
             String sliderLampChipId,
             String captureControllerChipId,
+            double capturePan,
+            double captureTilt,
             String targetChipId,
             int targetIndex,
             double sliderTargetMm,
@@ -2422,6 +2431,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         value.setCaptureControllerChipId(notBlank(value.getCaptureControllerChipId())
                 ? value.getCaptureControllerChipId().trim()
                 : null);
+        value.setCapturePan(clampDouble(value.getCapturePan(), 0D, 180D, 90D));
+        value.setCaptureTilt(clampDouble(value.getCaptureTilt(), 0D, 180D, 90D));
         if (value.getRois() == null) {
             value.setRois(new java.util.ArrayList<>());
         }

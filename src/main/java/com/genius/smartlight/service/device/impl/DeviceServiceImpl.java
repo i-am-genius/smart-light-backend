@@ -254,8 +254,7 @@ public class DeviceServiceImpl implements DeviceService {
         log.debug("Device online state before resume_broadcast, chipId={}, online={}", chipId, online);
 
         if (!online) {
-            log.warn("设备离线，无法发送恢复广播指令, chipId={}", chipId);
-            return;
+            log.warn("设备在线时间已过期，仍尝试通过现有 session 发送恢复广播指令, chipId={}", chipId);
         }
 
         try {

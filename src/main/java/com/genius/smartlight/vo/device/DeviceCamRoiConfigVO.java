@@ -20,6 +20,10 @@ public class DeviceCamRoiConfigVO {
     private String sliderLampChipId;
     @Schema(description = "负责舵机控制并向 ESP32 转发拍照任务的 cam_capture chipId")
     private String captureControllerChipId;
+    @Schema(description = "SG90 拍照控制器共享 Pan 预置角度（0~180，中位 90）", example = "90")
+    private Double capturePan;
+    @Schema(description = "SG90 拍照控制器共享 Tilt 预置角度（0~180，中位 90）", example = "90")
+    private Double captureTilt;
     private List<DeviceCamRoiItemVO> rois = new ArrayList<>();
     @Schema(description = "每个 ROI 的唯一滑轨位置，单位 mm")
     private Map<String, Double> sliderPresets = new LinkedHashMap<>();

@@ -124,6 +124,8 @@ class DeviceCamServiceImplTest {
                 .thenReturn(new SliderMotionStateService.SliderStateSnapshot(
                         0D, 0D, "normal", null, null
                 ));
+        when(sliderMotionStateService.requireConfirmedSpeedMode(any(String.class), any()))
+                .thenReturn("normal");
         writeDefaultCaptureConfig();
     }
 
@@ -392,7 +394,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void roiContract_usesSeparateGarmentAndPersonCapturePoses() throws Exception {
+    void roiContract_usesSeparateGarmentAndPersonCapturePosesPerRegion() throws Exception {
         DeviceCamRoiItemVO roi = new DeviceCamRoiItemVO();
         roi.setTargetIndex(1);
         roi.setTargetChipId("LAMP-001");
@@ -401,15 +403,15 @@ class DeviceCamServiceImplTest {
         roi.setY(0.2);
         roi.setW(0.3);
         roi.setH(0.4);
+        roi.setGarmentCapturePan(-12D);
+        roi.setGarmentCaptureTilt(240D);
+        roi.setPersonCapturePan(35D);
+        roi.setPersonCaptureTilt(145D);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
         config.setSliderLampChipId(SLIDER_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
-        config.setGarmentCapturePan(-12D);
-        config.setGarmentCaptureTilt(240D);
-        config.setPersonCapturePan(35D);
-        config.setPersonCaptureTilt(145D);
         config.setFlowUploadEnabled(true);
         config.setFlowUploadIntervalSeconds(45);
         config.setRois(List.of(roi));
@@ -422,14 +424,15 @@ class DeviceCamServiceImplTest {
         assertThat(json).contains(
                 "\"sliderLampChipId\":\"" + SLIDER_LAMP_CHIP_ID + "\"",
                 "\"captureControllerChipId\":\"" + CAPTURE_CONTROLLER_CHIP_ID + "\"",
-                "\"garmentCapturePan\":0.0",
-                "\"garmentCaptureTilt\":180.0",
-                "\"personCapturePan\":35.0",
-                "\"personCaptureTilt\":145.0",
                 "\"flowUploadEnabled\":true",
                 "\"flowUploadIntervalSeconds\":45",
                 "\"sliderPresets\":{\"1\":320.0}"
         );
+        JsonNode region = mapper.readTree(json).path("rois").get(0);
+        assertThat(region.path("garmentCapturePan").asDouble()).isEqualTo(0D);
+        assertThat(region.path("garmentCaptureTilt").asDouble()).isEqualTo(180D);
+        assertThat(region.path("personCapturePan").asDouble()).isEqualTo(35D);
+        assertThat(region.path("personCaptureTilt").asDouble()).isEqualTo(145D);
         assertThat(json).doesNotContain(
                 "capturePresets", "trackingPresets", "yaw", "pitch", "roll",
                 "centerPreset", "trackingLostTimeoutSeconds",
@@ -450,8 +453,12 @@ class DeviceCamServiceImplTest {
         JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
         assertThat(payload.path("type").asText()).isEqualTo("captureControllerConfig");
         assertThat(payload.path("camChipId").asText()).isEqualTo("CAM-001");
-        assertThat(payload.path("garmentCapturePreset").path("pan").asDouble()).isEqualTo(120D);
-        assertThat(payload.path("personCapturePreset").path("pan").asDouble()).isEqualTo(90D);
+        assertThat(payload.path("captureAreas").isArray()).isTrue();
+        assertThat(payload.path("captureAreas").get(0).path("targetIndex").asInt()).isEqualTo(1);
+        assertThat(payload.path("captureAreas").get(0).path("garmentCapturePreset").path("pan").asDouble())
+                .isEqualTo(120D);
+        assertThat(payload.path("captureAreas").get(0).path("personCapturePreset").path("pan").asDouble())
+                .isEqualTo(90D);
         assertThat(payload.path("flowUploadIntervalSeconds").asInt()).isEqualTo(30);
         assertThat(payload.path("flowUploadUrl").asText())
                 .contains("captureControllerChipId=" + CAPTURE_CONTROLLER_CHIP_ID);
@@ -481,10 +488,10 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiConfigVO normalized = service.normalizeConfig("CAM-001", legacy);
         String json = mapper.writeValueAsString(normalized);
 
-        assertThat(normalized.getGarmentCapturePan()).isEqualTo(90.0);
-        assertThat(normalized.getGarmentCaptureTilt()).isEqualTo(90.0);
-        assertThat(normalized.getPersonCapturePan()).isEqualTo(90.0);
-        assertThat(normalized.getPersonCaptureTilt()).isEqualTo(90.0);
+        assertThat(normalized.getRois().get(0).getGarmentCapturePan()).isEqualTo(90.0);
+        assertThat(normalized.getRois().get(0).getGarmentCaptureTilt()).isEqualTo(90.0);
+        assertThat(normalized.getRois().get(0).getPersonCapturePan()).isEqualTo(90.0);
+        assertThat(normalized.getRois().get(0).getPersonCaptureTilt()).isEqualTo(90.0);
         assertThat(normalized.getFlowUploadEnabled()).isFalse();
         assertThat(normalized.getFlowUploadIntervalSeconds()).isEqualTo(30);
         assertThat(normalized.getSliderPresets().get("1")).isEqualTo(0.0);
@@ -678,6 +685,30 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
+    void regionCapture_usesThatRegionsGarmentPresetInsteadOfGlobalNinetyDegrees() throws Exception {
+        writeBatchCaptureConfig();
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-003");
+        request.setTargetIndex(3);
+
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+        awaitCameraCapture(task.getTaskId());
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager, atLeastOnce())
+                .sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), payloadCaptor.capture());
+        JsonNode capture = payloadCaptor.getAllValues().stream()
+                .map(this::readJsonUnchecked)
+                .filter(payload -> "cameraCapture".equals(payload.path("type").asText()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(capture.path("targetIndex").asInt()).isEqualTo(3);
+        assertThat(capture.path("capturePreset").path("pan").asDouble()).isEqualTo(133D);
+        assertThat(capture.path("capturePreset").path("tilt").asDouble()).isEqualTo(73D);
+    }
+
+    @Test
     void automaticGarmentDetectionCreatesOneBatchAndStaysDetectingUntilAiFinishes() throws Exception {
         writeBatchCaptureConfig();
         when(deviceMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(
@@ -768,14 +799,14 @@ class DeviceCamServiceImplTest {
             assertThat(upload.getStatus()).isEqualTo("image_received");
         }
 
-        assertThat(batch.getStatus()).isEqualTo("returning_target_2");
+        assertThat(batch.getStatus()).isEqualTo("returning_standby");
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(deviceSessionManager, times(4))
                 .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode returnMotion = objectMapper.readTree(payloadCaptor.getAllValues().get(3));
         assertThat(returnMotion.path("source").asText()).isEqualTo("camera_batch_return");
         assertThat(returnMotion.path("taskId").asText()).isEqualTo(batch.getBatchId());
-        assertThat(returnMotion.path("slider").asDouble()).isEqualTo(640.0);
+        assertThat(returnMotion.path("slider").asDouble()).isEqualTo(380.0);
         verify(deviceSessionManager, times(3)).sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-001"), any());
@@ -892,6 +923,7 @@ class DeviceCamServiceImplTest {
         roi.setY(0.1);
         roi.setW(0.3);
         roi.setH(0.3);
+        configureNonIntersectingCollisionZone(roi);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
@@ -911,6 +943,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiItemVO target = new DeviceCamRoiItemVO();
         target.setTargetIndex(targetIndex);
         target.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+        configureNonIntersectingCollisionZone(target);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId(MANUAL_CAM_CHIP_ID);
@@ -929,6 +962,14 @@ class DeviceCamServiceImplTest {
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(deviceSessionManager).sendToDevice(eq(chipId), payloadCaptor.capture());
         assertThat(objectMapper.readTree(payloadCaptor.getValue()).path("type").asText()).isEqualTo(expectedType);
+    }
+
+    private JsonNode readJsonUnchecked(String value) {
+        try {
+            return objectMapper.readTree(value);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("invalid test payload", e);
+        }
     }
 
     private DeviceSliderStatusReqVO sliderArrival(
@@ -953,6 +994,7 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiItemVO target = new DeviceCamRoiItemVO();
         target.setTargetIndex(1);
         target.setTargetChipId("LAMP-001");
+        configureNonIntersectingCollisionZone(target);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
@@ -980,12 +1022,27 @@ class DeviceCamServiceImplTest {
         DeviceCamRoiItemVO target1 = new DeviceCamRoiItemVO();
         target1.setTargetIndex(1);
         target1.setTargetChipId("LAMP-001");
+        target1.setGarmentCapturePan(111D);
+        target1.setGarmentCaptureTilt(71D);
+        target1.setPersonCapturePan(91D);
+        target1.setPersonCaptureTilt(81D);
+        configureNonIntersectingCollisionZone(target1);
         DeviceCamRoiItemVO target2 = new DeviceCamRoiItemVO();
         target2.setTargetIndex(2);
         target2.setTargetChipId("LAMP-002");
+        target2.setGarmentCapturePan(122D);
+        target2.setGarmentCaptureTilt(72D);
+        target2.setPersonCapturePan(92D);
+        target2.setPersonCaptureTilt(82D);
+        configureNonIntersectingCollisionZone(target2);
         DeviceCamRoiItemVO target3 = new DeviceCamRoiItemVO();
         target3.setTargetIndex(3);
         target3.setTargetChipId("LAMP-003");
+        target3.setGarmentCapturePan(133D);
+        target3.setGarmentCaptureTilt(73D);
+        target3.setPersonCapturePan(93D);
+        target3.setPersonCaptureTilt(83D);
+        configureNonIntersectingCollisionZone(target3);
 
         DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
         config.setCamChipId("CAM-001");
@@ -999,11 +1056,12 @@ class DeviceCamServiceImplTest {
         config.setFlowUploadIntervalSeconds(30);
         config.setConfigured(true);
         config.setRois(List.of(target1, target2, target3));
-        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));
+        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0, "standby", 380.0));
         Map<String, DeviceCamSliderMoveTimeVO> batchMoveTimes = new LinkedHashMap<>();
         batchMoveTimes.putAll(moveTimes(1));
         batchMoveTimes.putAll(moveTimes(2));
         batchMoveTimes.putAll(moveTimes(3));
+        batchMoveTimes.put("standby", moveTimeValue());
         config.setSliderMoveTimes(batchMoveTimes);
         objectMapper.writeValue(defaultConfigPath().toFile(), config);
 
@@ -1022,11 +1080,21 @@ class DeviceCamServiceImplTest {
     }
 
     private Map<String, DeviceCamSliderMoveTimeVO> moveTimes(int targetIndex) {
+        return Map.of(String.valueOf(targetIndex), moveTimeValue());
+    }
+
+    private DeviceCamSliderMoveTimeVO moveTimeValue() {
         DeviceCamSliderMoveTimeVO value = new DeviceCamSliderMoveTimeVO();
         value.setSlow(0.001D);
         value.setNormal(0.001D);
         value.setFast(0.001D);
-        return Map.of(String.valueOf(targetIndex), value);
+        return value;
+    }
+
+    private void configureNonIntersectingCollisionZone(DeviceCamRoiItemVO target) {
+        target.setCollisionCenterMm(2000D);
+        target.setCollisionClearanceMm(10D);
+        target.setCollisionParkTimeSeconds(0.001D);
     }
 
     private void awaitCameraCapture(String taskId) {

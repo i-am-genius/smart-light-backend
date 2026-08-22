@@ -12,6 +12,7 @@ import com.genius.smartlight.service.device.DeviceCamService;
 import com.genius.smartlight.service.device.DeviceLastSeenService;
 import com.genius.smartlight.service.device.DeviceOnlinePushService;
 import com.genius.smartlight.service.device.OtaProgressStore;
+import com.genius.smartlight.service.device.SliderMotionStateService;
 import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
 import com.genius.smartlight.vo.device.DeviceLampProximityStateReqVO;
 import com.genius.smartlight.vo.device.DeviceCamPresenceReqVO;
@@ -46,6 +47,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
     private final OtaProgressStore otaProgressStore;
     private final DeviceLastSeenService deviceLastSeenService;
     private final DeviceCamService deviceCamService;
+    private final SliderMotionStateService sliderMotionStateService;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
@@ -84,6 +86,19 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 }
                 syncFirmwareInfo(chipId, node);
                 pushSavedStateToDevice(chipId);
+                if (DeviceTypeUtil.isLampLike(knownDevice.getDeviceType())) {
+                    sliderMotionStateService.clearSpeedConfirmation(chipId);
+                    try {
+                        String savedSpeed = sliderMotionStateService
+                                .getSnapshot(chipId, knownDevice.getStoreId()).speedMode();
+                        ObjectNode speedCommand = objectMapper.createObjectNode();
+                        speedCommand.put("type", "arm_speed");
+                        speedCommand.put("speed", savedSpeed);
+                        deviceSessionManager.sendToDevice(chipId, speedCommand.toString());
+                    } catch (RuntimeException exception) {
+                        log.warn("failed to restore slider speed on register, chipId={}", chipId, exception);
+                    }
+                }
                 deviceOnlinePushService.pushIfChanged(chipId);
                 String uploadToken = deviceSessionManager.refreshUploadToken(chipId);
                 ObjectNode ack = objectMapper.createObjectNode();
@@ -228,6 +243,27 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                     reqVO.setUptimeMs(node.path("uptimeMs").asLong());
                 }
                 deviceCamService.reportSliderStatus(reqVO);
+                return;
+            }
+
+            if ("armSpeedStatus".equals(type)) {
+                chipId = requireChipId(chipId, session, "armSpeedStatus");
+                if (chipId == null) return;
+                DeviceDO device = findDevice(chipId);
+                if (device != null && DeviceTypeUtil.isLampLike(device.getDeviceType())) {
+                    sliderMotionStateService.confirmSpeedMode(
+                            chipId, device.getStoreId(), node.path("speed").asText(null));
+                }
+                return;
+            }
+
+            if ("collisionGuardStatus".equals(type)) {
+                chipId = requireChipId(chipId, session, "collisionGuardStatus");
+                if (chipId == null) return;
+                log.debug("collision guard forwarded, chipId={}, guardId={}, status={}, nanoFeedback={}",
+                        chipId, node.path("guardId").asText(""),
+                        node.path("status").asText("unknown"),
+                        node.path("nanoFeedback").asBoolean(false));
                 return;
             }
 
@@ -500,6 +536,7 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                     session.getId(), chipId != null ? chipId : "-");
         }
         if (chipId != null) {
+            sliderMotionStateService.clearSpeedConfirmation(chipId);
             deviceOnlinePushService.pushIfChanged(chipId);
         }
     }

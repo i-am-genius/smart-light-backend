@@ -366,6 +366,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         resp.setMessage(reqVO.getMessage());
         resp.setUpdateTime(LocalDateTime.now());
         statusCache.put(cam.getChipId(), resp);
+        recoverTrackingCacheFromCamStatus(cam, resp);
         webSocketPushService.pushCamStatus(resp, cam.getStoreId());
         return resp;
     }
@@ -1705,14 +1706,36 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (notBlank(terminalCamChipId)) {
             String terminalStatus = defaultStatus(resp.getTrackingStatus(), "unknown")
                     .toLowerCase(Locale.ROOT);
+            String terminalReason = "tracking " + terminalStatus;
             sendLampTrackingStop(
                     terminalLampChipId,
                     terminalCamChipId,
-                    "tracking " + terminalStatus,
+                    terminalReason,
                     clearClothTaken
             );
             if (clearClothTaken) {
                 clearLampTakenState(terminalLampChipId, device.getStoreId());
+            }
+            if (Set.of("lost", "timeout", "error").contains(terminalStatus)) {
+                DeviceDO cam = requireCam(terminalCamChipId);
+                if (deviceSessionManager.isOnline(cam.getChipId())) {
+                    sendCameraReturnCenter(cam, terminalReason);
+                }
+
+                TrackingCandidate stopped = new TrackingCandidate();
+                stopped.camChipId = cam.getChipId();
+                stopped.lampChipId = terminalLampChipId;
+                stopped.targetIndex = resp.getTargetIndex();
+                stopped.confidence = resp.getConfidence();
+                pushTracking(stopped, "stopped", terminalReason, cam.getStoreId());
+
+                DeviceCamStatusRespVO returning = new DeviceCamStatusRespVO();
+                returning.setCamChipId(cam.getChipId());
+                returning.setWorkStatus("returning_center");
+                returning.setMessage(terminalReason);
+                returning.setUpdateTime(LocalDateTime.now());
+                statusCache.put(cam.getChipId(), returning);
+                webSocketPushService.pushCamStatus(returning, cam.getStoreId());
             }
         }
         return resp;
@@ -1731,6 +1754,33 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         cleared.setUpdateTime(LocalDateTime.now());
         clothStateCache.put(lampChipId, cleared);
         webSocketPushService.pushLampClothState(cleared, storeId);
+    }
+
+    private void recoverTrackingCacheFromCamStatus(DeviceDO cam, DeviceCamStatusRespVO status) {
+        String workStatus = defaultStatus(status.getWorkStatus(), "unknown")
+                .toLowerCase(Locale.ROOT);
+        if (!Set.of("monitoring", "presence").contains(workStatus)) {
+            return;
+        }
+
+        DeviceTrackingStatusRespVO previous = trackingCache.get(cam.getChipId());
+        if (previous == null || !isTerminalTrackingStatus(previous.getTrackingStatus())) {
+            return;
+        }
+
+        cancelPendingTracking(cam.getChipId());
+        activeTrackingByCam.remove(cam.getChipId());
+        TrackingCandidate recovered = new TrackingCandidate();
+        recovered.camChipId = cam.getChipId();
+        recovered.lampChipId = previous.getLampChipId();
+        recovered.targetIndex = previous.getTargetIndex();
+        recovered.confidence = previous.getConfidence();
+        pushTracking(
+                recovered,
+                "monitoring",
+                defaultStatus(status.getMessage(), "camera monitoring resumed"),
+                cam.getStoreId()
+        );
     }
 
     private DeviceCamPresenceRespVO emptyPresence(String camChipId) {

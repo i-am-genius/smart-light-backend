@@ -19,6 +19,8 @@ import com.genius.smartlight.vo.device.DeviceCamCaptureTaskRespVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiConfigVO;
 import com.genius.smartlight.vo.device.DeviceCamRoiItemVO;
 import com.genius.smartlight.vo.device.DeviceCamSliderMoveTimeVO;
+import com.genius.smartlight.vo.device.DeviceCamStatusReqVO;
+import com.genius.smartlight.vo.device.DeviceCamStatusRespVO;
 import com.genius.smartlight.vo.device.DeviceCamTrackingControlReqVO;
 import com.genius.smartlight.vo.device.DeviceLampClothStateReqVO;
 import com.genius.smartlight.vo.device.DeviceLampClothStateRespVO;
@@ -180,7 +182,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void terminalCameraStatus_releasesLampBackToGarmentOrDefaultAim() throws Exception {
+    void terminalCameraStatus_releasesDevicesAndReturnsCameraToMonitoring() throws Exception {
         configureManualTrackingDevices(true, true, "192.168.1.88");
         writeManualTrackingConfig();
         service.startTrackingManually(manualTrackingRequest(1));
@@ -195,8 +197,8 @@ class DeviceCamServiceImplTest {
         status.setTargetIndex(1);
         service.reportTrackingStatus(status);
 
-        assertThat(service.getTrackingStatus(MANUAL_CAM_CHIP_ID)).isEqualTo("lost");
-        assertThat(service.getTrackingStatus(MANUAL_LAMP_CHIP_ID)).isEqualTo("lost");
+        assertThat(service.getTrackingStatus(MANUAL_CAM_CHIP_ID)).isEqualTo("stopped");
+        assertThat(service.getTrackingStatus(MANUAL_LAMP_CHIP_ID)).isEqualTo("stopped");
 
         ArgumentCaptor<String> lampPayloads = ArgumentCaptor.forClass(String.class);
         verify(deviceSessionManager, times(3))
@@ -208,6 +210,43 @@ class DeviceCamServiceImplTest {
         JsonNode stop = objectMapper.readTree(lampPayloads.getAllValues().get(2));
         assertThat(stop.path("type").asText()).isEqualTo("lampTrackingStop");
         assertThat(stop.path("clearClothTaken").asBoolean()).isTrue();
+
+        verify(deviceSessionManager).sendToDevice(
+                eq(MANUAL_CAM_CHIP_ID),
+                argThat(payload -> payload.contains("\"type\":\"cameraReturnCenter\""))
+        );
+        verify(webSocketPushService).pushCamStatus(
+                argThat(payload -> payload instanceof DeviceCamStatusRespVO status
+                        && "returning_center".equals(status.getWorkStatus())),
+                eq(1L)
+        );
+
+        DeviceCamStatusReqVO monitoring = new DeviceCamStatusReqVO();
+        monitoring.setCamChipId(MANUAL_CAM_CHIP_ID);
+        monitoring.setWorkStatus("monitoring");
+        service.reportStatus(monitoring);
+
+        assertThat(service.getTrackingStatus(MANUAL_CAM_CHIP_ID)).isEqualTo("monitoring");
+        assertThat(service.getTrackingStatus(MANUAL_LAMP_CHIP_ID)).isEqualTo("monitoring");
+    }
+
+    @Test
+    void monitoringStatus_doesNotCancelPendingSliderAlignment() throws Exception {
+        configureManualTrackingDevices(true, true, "192.168.1.88");
+        writeManualTrackingConfig();
+        service.startTrackingManually(manualTrackingRequest(1));
+
+        DeviceCamStatusReqVO monitoring = new DeviceCamStatusReqVO();
+        monitoring.setCamChipId(MANUAL_CAM_CHIP_ID);
+        monitoring.setWorkStatus("monitoring");
+        service.reportStatus(monitoring);
+        service.triggerPendingTracking(MANUAL_CAM_CHIP_ID);
+
+        assertThat(service.getTrackingStatus(MANUAL_CAM_CHIP_ID)).isEqualTo("tracking");
+        verify(deviceSessionManager).sendToDevice(
+                eq(MANUAL_CAM_CHIP_ID),
+                argThat(payload -> payload.contains("\"type\":\"cameraStartTracking\""))
+        );
     }
 
     @Test

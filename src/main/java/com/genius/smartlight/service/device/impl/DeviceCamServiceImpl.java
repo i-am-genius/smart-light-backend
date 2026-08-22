@@ -2701,9 +2701,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 ? 30
                 : value.getFlowUploadIntervalSeconds();
         value.setFlowUploadIntervalSeconds(Math.max(5, Math.min(3600, flowUploadIntervalSeconds)));
-        if (value.getRois() == null) {
-            value.setRois(new java.util.ArrayList<>());
-        }
+        value.setRois(value.getRois() == null
+                ? new java.util.ArrayList<>()
+                : new java.util.ArrayList<>(value.getRois()));
         value.getRois().sort(Comparator.comparing(item -> item.getTargetIndex() == null ? 99 : item.getTargetIndex()));
         for (DeviceCamRoiItemVO roi : value.getRois()) {
             roi.setTargetIndex(normalizeTargetIndex(roi.getTargetIndex()));

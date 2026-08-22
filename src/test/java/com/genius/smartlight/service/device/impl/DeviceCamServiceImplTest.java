@@ -581,6 +581,60 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
+    void singleCaptureUpload_returnsSliderToStandbyBeforeReleasingCaptureSlot() throws Exception {
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+        awaitCameraCapture(task.getTaskId());
+
+        DeviceCamCaptureTaskRespVO response = service.uploadCapturePhoto(
+                task.getTaskId(),
+                new MockMultipartFile("file", "single.jpg", "image/jpeg", new byte[]{1, 2, 3})
+        );
+        rememberTestUpload(response);
+
+        assertThat(response.getStatus()).isEqualTo("image_received");
+        ArgumentCaptor<String> sliderPayloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager, timeout(1500).times(2))
+                .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), sliderPayloadCaptor.capture());
+        JsonNode returnMotion = objectMapper.readTree(sliderPayloadCaptor.getAllValues().get(1));
+        assertThat(returnMotion.path("source").asText()).isEqualTo("camera_single_return");
+        assertThat(returnMotion.path("taskId").asText()).isEqualTo(task.getTaskId());
+        assertThat(returnMotion.path("slider").asDouble()).isEqualTo(480.0);
+
+        assertThatThrownBy(() -> service.createCaptureTask(request))
+                .hasMessageContaining("滑轨控制灯已有拍摄任务执行中");
+        verify(sliderMotionStateService, timeout(1500))
+                .completeMotion(SLIDER_LAMP_CHIP_ID, 1L, 480.0);
+    }
+
+    @Test
+    void singleCaptureAtTargetThree_returnsToTargetTwoThreeMidpoint() throws Exception {
+        writeBatchCaptureConfig();
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-003");
+        request.setTargetIndex(3);
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+        awaitCameraCapture(task.getTaskId());
+
+        DeviceCamCaptureTaskRespVO response = service.uploadCapturePhoto(
+                task.getTaskId(),
+                new MockMultipartFile("file", "single-3.jpg", "image/jpeg", new byte[]{1, 2, 3})
+        );
+        rememberTestUpload(response);
+
+        ArgumentCaptor<String> sliderPayloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(deviceSessionManager, timeout(1500).times(2))
+                .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), sliderPayloadCaptor.capture());
+        JsonNode returnMotion = objectMapper.readTree(sliderPayloadCaptor.getAllValues().get(1));
+        assertThat(returnMotion.path("source").asText()).isEqualTo("camera_single_return");
+        assertThat(returnMotion.path("slider").asDouble()).isEqualTo(380.0);
+    }
+
+    @Test
     void flowPhotoUpload_acceptsBoundCaptureControllerTokenAndRunsServerDetection() {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "flow.jpg", "image/jpeg", new byte[]{1, 2, 3}
@@ -938,7 +992,7 @@ class DeviceCamServiceImplTest {
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
         config.setConfigured(true);
         config.setRois(List.of(roi));
-        config.setSliderPresets(Map.of("1", 600.0));
+        config.setSliderPresets(Map.of("1", 600.0, "2", 300.0, "3", 900.0));
         config.setSliderMoveTimes(moveTimes(1));
 
         Path path = manualConfigPath();
@@ -974,7 +1028,7 @@ class DeviceCamServiceImplTest {
         config.setSliderLampChipId(MANUAL_LAMP_CHIP_ID);
         config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
         config.setRois(List.of(target));
-        config.setSliderPresets(Map.of(String.valueOf(targetIndex), 600.0));
+        config.setSliderPresets(Map.of("1", 200.0, "2", 600.0, "3", 900.0));
         config.setSliderMoveTimes(moveTimes(targetIndex));
 
         Path path = manualConfigPath();
@@ -1023,7 +1077,7 @@ class DeviceCamServiceImplTest {
         config.setFlowUploadEnabled(false);
         config.setFlowUploadIntervalSeconds(30);
         config.setRois(List.of(target));
-        config.setSliderPresets(Map.of("1", 320.0));
+        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));
         config.setSliderMoveTimes(moveTimes(1));
 
         try {
@@ -1060,12 +1114,11 @@ class DeviceCamServiceImplTest {
         config.setFlowUploadIntervalSeconds(30);
         config.setConfigured(true);
         config.setRois(List.of(target1, target2, target3));
-        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0, "standby", 380.0));
+        config.setSliderPresets(Map.of("1", 320.0, "2", 640.0, "3", 120.0));
         Map<String, DeviceCamSliderMoveTimeVO> batchMoveTimes = new LinkedHashMap<>();
         batchMoveTimes.putAll(moveTimes(1));
         batchMoveTimes.putAll(moveTimes(2));
         batchMoveTimes.putAll(moveTimes(3));
-        batchMoveTimes.put("standby", moveTimeValue());
         config.setSliderMoveTimes(batchMoveTimes);
         objectMapper.writeValue(defaultConfigPath().toFile(), config);
 
@@ -1151,4 +1204,3 @@ class DeviceCamServiceImplTest {
         doAnswer(answer).when(deviceMapper).selectOne(any(LambdaQueryWrapper.class), anyBoolean());
     }
 }
-

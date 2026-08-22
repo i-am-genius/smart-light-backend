@@ -229,12 +229,27 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         payload.put("captureControllerChipId", config.getCaptureControllerChipId());
         payload.put("flowUploadEnabled", Boolean.TRUE.equals(config.getFlowUploadEnabled()));
         payload.put("flowUploadIntervalSeconds", config.getFlowUploadIntervalSeconds());
-        ObjectNode garmentPreset = payload.putObject("garmentCapturePreset");
-        garmentPreset.put("pan", config.getGarmentCapturePan());
-        garmentPreset.put("tilt", config.getGarmentCaptureTilt());
-        ObjectNode personPreset = payload.putObject("personCapturePreset");
-        personPreset.put("pan", config.getPersonCapturePan());
-        personPreset.put("tilt", config.getPersonCaptureTilt());
+        var captureAreas = payload.putArray("captureAreas");
+        for (DeviceCamRoiItemVO roi : config.getRois()) {
+            ObjectNode area = captureAreas.addObject();
+            area.put("targetIndex", roi.getTargetIndex());
+            ObjectNode garmentPreset = area.putObject("garmentCapturePreset");
+            garmentPreset.put("pan", roi.getGarmentCapturePan());
+            garmentPreset.put("tilt", roi.getGarmentCaptureTilt());
+            ObjectNode personPreset = area.putObject("personCapturePreset");
+            personPreset.put("pan", roi.getPersonCapturePan());
+            personPreset.put("tilt", roi.getPersonCaptureTilt());
+        }
+        // 兼容尚未升级到分区预置协议的拍照控制器；区域任务本身仍会携带精确角度。
+        DeviceCamRoiItemVO fallbackArea = config.getRois().stream().findFirst().orElse(null);
+        if (fallbackArea != null) {
+            ObjectNode garmentPreset = payload.putObject("garmentCapturePreset");
+            garmentPreset.put("pan", fallbackArea.getGarmentCapturePan());
+            garmentPreset.put("tilt", fallbackArea.getGarmentCaptureTilt());
+            ObjectNode personPreset = payload.putObject("personCapturePreset");
+            personPreset.put("pan", fallbackArea.getPersonCapturePan());
+            personPreset.put("tilt", fallbackArea.getPersonCaptureTilt());
+        }
         payload.put(
                 "flowUploadUrl",
                 "/device/cam/flow-photo?camChipId=" + config.getCamChipId()
@@ -502,13 +517,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         taskCache.put(task.getTaskId(), task);
         String uploadToken = UUID.randomUUID().toString().replace("-", "");
         captureUploadTokens.put(task.getTaskId(), uploadToken);
+        DeviceCamRoiItemVO captureRoi = requireCaptureRoi(config, targetIndex);
 
         PendingCaptureMotion pending = new PendingCaptureMotion(
                 cam.getChipId(),
                 sliderLamp.getChipId(),
                 captureController.getChipId(),
-                config.getGarmentCapturePan(),
-                config.getGarmentCaptureTilt(),
+                captureRoi.getGarmentCapturePan(),
+                captureRoi.getGarmentCaptureTilt(),
                 target.getChipId(),
                 targetIndex,
                 sliderTargetMm,
@@ -845,12 +861,13 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
 
         String uploadToken = captureUploadTokens.get(task.getTaskId());
+        DeviceCamRoiItemVO captureRoi = requireCaptureRoi(context.config(), target.targetIndex());
         PendingCaptureMotion pending = new PendingCaptureMotion(
                 task.getCamChipId(),
                 context.sliderLampChipId(),
                 context.captureControllerChipId(),
-                context.config().getGarmentCapturePan(),
-                context.config().getGarmentCaptureTilt(),
+                captureRoi.getGarmentCapturePan(),
+                captureRoi.getGarmentCaptureTilt(),
                 target.targetChipId(),
                 target.targetIndex(),
                 target.sliderTargetMm(),
@@ -2609,6 +2626,18 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             roi.setY(clamp01(roi.getY()));
             roi.setW(clamp01(roi.getW()));
             roi.setH(clamp01(roi.getH()));
+            roi.setGarmentCapturePan(clampDouble(
+                    roi.getGarmentCapturePan(), 0D, 180D, value.getGarmentCapturePan()
+            ));
+            roi.setGarmentCaptureTilt(clampDouble(
+                    roi.getGarmentCaptureTilt(), 0D, 180D, value.getGarmentCaptureTilt()
+            ));
+            roi.setPersonCapturePan(clampDouble(
+                    roi.getPersonCapturePan(), 0D, 180D, value.getPersonCapturePan()
+            ));
+            roi.setPersonCaptureTilt(clampDouble(
+                    roi.getPersonCaptureTilt(), 0D, 180D, value.getPersonCaptureTilt()
+            ));
             roi.setCollisionCenterMm(clampDouble(roi.getCollisionCenterMm(), 0D, 2500D, 0D));
             roi.setCollisionClearanceMm(clampDouble(roi.getCollisionClearanceMm(), 0D, 2500D, 0D));
             roi.setCollisionParkTimeSeconds(normalizeMoveTime(roi.getCollisionParkTimeSeconds()));
@@ -2670,6 +2699,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return null;
         }
         return presets.get(key).getSlider();
+    }
+
+    private DeviceCamRoiItemVO requireCaptureRoi(DeviceCamRoiConfigVO config, Integer targetIndex) {
+        int normalizedTargetIndex = normalizeTargetIndex(targetIndex);
+        return config.getRois().stream()
+                .filter(roi -> roi.getTargetIndex() != null && roi.getTargetIndex() == normalizedTargetIndex)
+                .findFirst()
+                .orElseThrow(() -> new ServiceException("区域 " + normalizedTargetIndex + " 拍摄角度未配置"));
     }
 
     private double resolveSliderPreset(DeviceCamRoiConfigVO config, Integer targetIndex) {

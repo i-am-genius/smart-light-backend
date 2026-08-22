@@ -115,8 +115,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private final Set<String> failedAutomaticDetectionBatches = ConcurrentHashMap.newKeySet();
     private final Map<String, DeviceTrackingStatusRespVO> trackingCache = new ConcurrentHashMap<>();
     private final Map<String, TrackingSession> activeTrackingByCam = new ConcurrentHashMap<>();
-    private final Map<String, PendingTracking> pendingTrackingByCam = new ConcurrentHashMap<>();
-    private final Map<String, String> pendingTrackingBySliderLamp = new ConcurrentHashMap<>();
     private final Map<String, PresenceDurationState> presenceDurationState = new ConcurrentHashMap<>();
     private final Map<String, String> captureUploadTokens = new ConcurrentHashMap<>();
     private final Map<String, PendingCaptureMotion> pendingCaptureMotions = new ConcurrentHashMap<>();
@@ -397,16 +395,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
         String requestedKey = trackingKey(lamp.getChipId(), targetIndex);
         TrackingSession active = activeTrackingByCam.get(cam.getChipId());
-        PendingTracking pending = pendingTrackingByCam.get(cam.getChipId());
-        if ((active != null && !requestedKey.equals(active.trackingKey()))
-                || (pending != null && !requestedKey.equals(pending.trackingKey()))) {
+        if (active != null && !requestedKey.equals(active.trackingKey())) {
             stopTrackingIfActive(cam.getChipId(), "manual tracking target changed");
         }
 
         TrackingCandidate candidate = trackingCandidate(cam.getChipId(), lamp.getChipId(), targetIndex);
-        startTrackingIfNeeded(candidate, config, TrackingSource.MANUAL, "manual tracking started");
+        startTrackingIfNeeded(candidate, TrackingSource.MANUAL, "manual tracking started");
         DeviceTrackingStatusRespVO result = trackingCache.get(cam.getChipId());
-        if (result == null || !Set.of("waiting_motion", "tracking").contains(result.getTrackingStatus())) {
+        if (result == null || !"tracking".equals(result.getTrackingStatus())) {
             throw new ServiceException(result == null ? "追踪指令下发失败" : result.getMessage());
         }
         return result;
@@ -425,7 +421,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             throw new ServiceException("目标灯离线，无法停止追踪");
         }
 
-        cancelPendingTracking(cam.getChipId());
         activeTrackingByCam.remove(cam.getChipId());
         sendLampTrackingStop(lamp.getChipId(), cam.getChipId(), "manual tracking stopped", false);
         sendCameraReturnCenter(cam, "manual tracking stopped");
@@ -459,7 +454,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
             throw new ServiceException("滑轨控制灯离线，无法执行滑轨对位");
         }
-        requireTrackingSlotsAvailable(cam.getChipId(), sliderLamp.getChipId());
         double sliderTargetMm = resolveSliderPreset(config, targetIndex);
         TimedSliderMotion motionPlan = planSliderMotion(
                 config,
@@ -567,8 +561,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
             throw new ServiceException("滑轨控制灯离线，无法执行批量拍摄");
         }
-        requireTrackingSlotsAvailable(cam.getChipId(), sliderLamp.getChipId());
-
         List<BatchCaptureTarget> targets = buildBatchCaptureTargets(config, cam.getStoreId());
         validateBatchMotionCalibration(config, sliderLamp, targets);
         String batchId = UUID.randomUUID().toString();
@@ -1475,13 +1467,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             activeCaptureTaskByCaptureController.remove(captureControllerChipId, operationId);
         }
         activeCaptureTaskByCam.remove(camChipId, operationId);
-        if (notBlank(camChipId)) {
-            try {
-                evaluateTrackingForCam(camChipId);
-            } catch (RuntimeException e) {
-                log.warn("tracking reevaluation after capture release failed, camChipId={}", camChipId, e);
-            }
-        }
     }
 
     private void failCaptureTask(DeviceCamCaptureTaskRespVO task, String status, String message, Long storeId) {
@@ -1597,16 +1582,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         if (!online && notBlank(chipId)) {
             proximityStateCache.remove(chipId);
             List<String> affectedCams = new java.util.ArrayList<>();
-            pendingTrackingByCam.values().stream()
-                    .filter(pending -> sameChipId(chipId, pending.camChipId())
-                            || sameChipId(chipId, pending.lampChipId())
-                            || sameChipId(chipId, pending.sliderLampChipId()))
-                    .map(PendingTracking::camChipId)
-                    .forEach(affectedCams::add);
             activeTrackingByCam.values().stream()
                     .filter(session -> sameChipId(chipId, session.camChipId())
-                            || sameChipId(chipId, session.lampChipId())
-                            || sameChipId(chipId, session.sliderLampChipId()))
+                            || sameChipId(chipId, session.lampChipId()))
                     .map(TrackingSession::camChipId)
                     .forEach(affectedCams::add);
             affectedCams.stream().distinct().forEach(camChipId -> {
@@ -1676,16 +1654,11 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             String camChipId = notBlank(resp.getCamChipId()) ? resp.getCamChipId() :
                     ("cam".equals(resp.getRole()) ? resp.getChipId() : null);
             if (notBlank(camChipId)) {
-                PendingTracking pending = cancelPendingTracking(camChipId);
                 TrackingSession active = activeTrackingByCam.remove(camChipId);
                 String lampChipId = notBlank(resp.getLampChipId())
                         ? resp.getLampChipId()
-                        : active != null
-                                ? active.lampChipId()
-                                : pending == null ? null : pending.lampChipId();
-                TrackingSource source = active != null
-                        ? active.source()
-                        : pending == null ? null : pending.source();
+                        : active == null ? null : active.lampChipId();
+                TrackingSource source = active == null ? null : active.source();
                 String terminalStatus = defaultStatus(resp.getTrackingStatus(), "unknown")
                         .toLowerCase(Locale.ROOT);
                 clearClothTaken = Set.of("lost", "timeout").contains(terminalStatus)
@@ -1768,7 +1741,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return;
         }
 
-        cancelPendingTracking(cam.getChipId());
         activeTrackingByCam.remove(cam.getChipId());
         TrackingCandidate recovered = new TrackingCandidate();
         recovered.camChipId = cam.getChipId();
@@ -1880,7 +1852,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             return;
         }
 
-        startTrackingIfNeeded(candidate, config);
+        startTrackingIfNeeded(candidate);
     }
 
     private TrackingCandidate toTrackingCandidate(String camChipId, DeviceCamPresenceReqVO.PresenceArea area, DeviceCamRoiConfigVO config) {
@@ -1928,10 +1900,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return clothState != null && "taken".equals(defaultStatus(clothState.getClothState(), "unknown"));
     }
 
-    private void startTrackingIfNeeded(TrackingCandidate candidate, DeviceCamRoiConfigVO config) {
+    private void startTrackingIfNeeded(TrackingCandidate candidate) {
         startTrackingIfNeeded(
                 candidate,
-                config,
                 TrackingSource.AUTO_TOF,
                 "presence + cloth taken, tracking started"
         );
@@ -1939,7 +1910,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
 
     private void startTrackingIfNeeded(
             TrackingCandidate candidate,
-            DeviceCamRoiConfigVO config,
             TrackingSource source,
             String successMessage) {
         DeviceDO cam = requireCam(candidate.camChipId);
@@ -1962,207 +1932,40 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             pushTracking(candidate, "tracking", "tracking condition still active", cam.getStoreId());
             return;
         }
-        PendingTracking existingPending = pendingTrackingByCam.get(candidate.camChipId);
-        if (existingPending != null) {
-            if (requestedKey.equals(existingPending.trackingKey())) {
-                pushTracking(candidate, "waiting_motion", "waiting for slider alignment", cam.getStoreId());
-            }
-            return;
+        if (active != null) {
+            stopTrackingIfActive(candidate.camChipId, "tracking target changed");
         }
-
-        DeviceDO sliderLamp;
-        try {
-            sliderLamp = requireSliderLamp(config);
-        } catch (ServiceException e) {
-            stopTrackingIfActive(candidate.camChipId, "slider lamp is not configured");
-            pushTracking(candidate, "error", e.getMessage(), cam.getStoreId());
-            return;
-        }
-        if (!deviceSessionManager.isOnline(sliderLamp.getChipId())) {
-            stopTrackingIfActive(candidate.camChipId, "slider lamp offline");
-            pushTracking(candidate, "error", "滑轨控制灯离线", cam.getStoreId());
-            return;
-        }
-
-        if (isCaptureSlotBusy(activeCaptureTaskByCam, cam.getChipId())
-                || isCaptureSlotBusy(activeCaptureTaskBySliderLamp, sliderLamp.getChipId())) {
-            if (source == TrackingSource.MANUAL) {
-                pushTracking(candidate, "error", "摄像头或滑轨正在执行拍摄任务", cam.getStoreId());
-            }
-            return;
-        }
-
-        double sliderTargetMm = resolveSliderPreset(config, candidate.targetIndex);
-        TimedSliderMotion motionPlan;
-        try {
-            motionPlan = planSliderMotion(config, candidate.targetIndex, sliderLamp, sliderTargetMm);
-        } catch (RuntimeException e) {
-            pushTracking(candidate, "error", e.getMessage(), cam.getStoreId());
-            return;
-        }
-
-        PendingTracking pending = new PendingTracking(
-                UUID.randomUUID().toString(),
+        String camCommand = buildCameraStartTrackingCommand(
                 cam.getChipId(),
                 lamp.getChipId(),
-                sliderLamp.getChipId(),
                 candidate.targetIndex,
-                candidate.confidence,
-                lampIp,
-                cam.getStoreId(),
-                source,
-                successMessage,
-                motionPlan
+                lampIp
         );
-        String claimedBy = pendingTrackingBySliderLamp.putIfAbsent(sliderLamp.getChipId(), pending.id());
-        if (claimedBy != null) {
-            if (source == TrackingSource.MANUAL) {
-                pushTracking(candidate, "error", "滑轨已有追踪对位任务", cam.getStoreId());
-            }
+        if (!sendLampTrackingStart(lamp.getChipId(), cam.getChipId(), candidate.targetIndex)) {
+            pushTracking(candidate, "error", "lamp tracking lock command send failed", cam.getStoreId());
             return;
         }
-        if (pendingTrackingByCam.putIfAbsent(cam.getChipId(), pending) != null) {
-            pendingTrackingBySliderLamp.remove(sliderLamp.getChipId(), pending.id());
-            return;
-        }
-
-        if (!sendSliderPositionToLamp(sliderLamp.getChipId(), sliderTargetMm, "camera_tracking")) {
-            removePendingTracking(pending);
-            pushTracking(candidate, "error", "slider command send failed", cam.getStoreId());
-            return;
-        }
-        try {
-            beginSliderMotion(sliderLamp, motionPlan);
-        } catch (RuntimeException e) {
-            removePendingTracking(pending);
-            log.warn("tracking slider motion state save failed, camChipId={}, lampChipId={}",
-                    cam.getChipId(), sliderLamp.getChipId(), e);
-            pushTracking(candidate, "error", "slider position state save failed", cam.getStoreId());
-            return;
-        }
-
-        pushTracking(candidate, "waiting_motion", "waiting for slider alignment", cam.getStoreId());
-        long delayMs = TrackingStartDelayPolicy.delayMs(motionPlan.delayMs());
-        captureTimeoutExecutor.schedule(
-                () -> triggerPendingTracking(cam.getChipId(), pending.id()),
-                delayMs,
-                TimeUnit.MILLISECONDS
-        );
-    }
-
-    void triggerPendingTracking(String camChipId) {
-        PendingTracking pending = pendingTrackingByCam.get(camChipId);
-        if (pending != null) {
-            triggerPendingTracking(camChipId, pending.id());
-        }
-    }
-
-    private void triggerPendingTracking(String camChipId, String pendingId) {
-        PendingTracking pending = pendingTrackingByCam.get(camChipId);
-        if (pending == null || !pending.id().equals(pendingId)) {
-            return;
-        }
-        removePendingTracking(pending);
-
-        TrackingCandidate candidate = trackingCandidate(
-                pending.camChipId(),
-                pending.lampChipId(),
-                pending.targetIndex()
-        );
-        candidate.confidence = pending.confidence();
-
-        try {
-            DeviceDO sliderLamp = requireLampLike(pending.sliderLampChipId());
-            sliderMotionStateService.completeMotion(
-                    sliderLamp.getChipId(),
-                    sliderLamp.getStoreId(),
-                    pending.motionPlan().targetPositionMm()
+        if (!deviceSessionManager.sendToDevice(cam.getChipId(), camCommand)) {
+            sendLampTrackingStop(
+                    lamp.getChipId(),
+                    cam.getChipId(),
+                    "camera tracking command send failed",
+                    source == TrackingSource.AUTO_TOF
             );
-        } catch (RuntimeException e) {
-            log.warn("tracking slider state completion failed, camChipId={}, sliderLampChipId={}",
-                    pending.camChipId(), pending.sliderLampChipId(), e);
-        }
-
-        if (!deviceSessionManager.isOnline(pending.camChipId())
-                || !deviceSessionManager.isOnline(pending.lampChipId())
-                || !deviceSessionManager.isOnline(pending.sliderLampChipId())) {
-            failPendingTracking(candidate, pending, "cam or lamp offline before tracking start");
-            return;
-        }
-        if (isCaptureSlotBusy(activeCaptureTaskByCam, pending.camChipId())
-                || isCaptureSlotBusy(activeCaptureTaskBySliderLamp, pending.sliderLampChipId())) {
-            failPendingTracking(candidate, pending, "capture task occupied camera or slider");
+            if (source == TrackingSource.AUTO_TOF) {
+                clearLampTakenState(lamp.getChipId(), cam.getStoreId());
+            }
+            pushTracking(candidate, "error", "camera tracking command send failed", cam.getStoreId());
             return;
         }
 
-        String camCommand = buildCameraStartTrackingCommand(
-                pending.camChipId(),
-                pending.lampChipId(),
-                pending.targetIndex(),
-                pending.lampIp()
-        );
-        if (!sendLampTrackingStart(pending.lampChipId(), pending.camChipId(), pending.targetIndex())) {
-            failPendingTracking(candidate, pending, "lamp tracking lock command send failed");
-            return;
-        }
-        if (!deviceSessionManager.sendToDevice(pending.camChipId(), camCommand)) {
-            failPendingTracking(candidate, pending, "camera tracking command send failed");
-            return;
-        }
-
-        activeTrackingByCam.put(pending.camChipId(), new TrackingSession(
-                pending.camChipId(),
-                pending.lampChipId(),
-                pending.sliderLampChipId(),
-                pending.targetIndex(),
-                pending.source()
+        activeTrackingByCam.put(cam.getChipId(), new TrackingSession(
+                cam.getChipId(),
+                lamp.getChipId(),
+                candidate.targetIndex,
+                source
         ));
-        pushTracking(candidate, "tracking", pending.successMessage(), pending.storeId());
-    }
-
-    private void failPendingTracking(
-            TrackingCandidate candidate,
-            PendingTracking pending,
-            String message) {
-        sendLampTrackingStop(
-                pending.lampChipId(),
-                pending.camChipId(),
-                message,
-                pending.source() == TrackingSource.AUTO_TOF
-        );
-        if (pending.source() == TrackingSource.AUTO_TOF) {
-            clearLampTakenState(pending.lampChipId(), pending.storeId());
-        }
-        pushTracking(candidate, "error", message, pending.storeId());
-    }
-
-    private void removePendingTracking(PendingTracking pending) {
-        pendingTrackingByCam.remove(pending.camChipId(), pending);
-        pendingTrackingBySliderLamp.remove(pending.sliderLampChipId(), pending.id());
-    }
-
-    private PendingTracking cancelPendingTracking(String camChipId) {
-        PendingTracking pending = pendingTrackingByCam.remove(camChipId);
-        if (pending != null) {
-            pendingTrackingBySliderLamp.remove(pending.sliderLampChipId(), pending.id());
-        }
-        return pending;
-    }
-
-    private boolean isCaptureSlotBusy(Map<String, String> slots, String chipId) {
-        String operationId = slots.get(chipId);
-        return notBlank(operationId) && isCaptureOperationActive(operationId);
-    }
-
-    private void requireTrackingSlotsAvailable(String camChipId, String sliderLampChipId) {
-        if (pendingTrackingByCam.containsKey(camChipId) || activeTrackingByCam.containsKey(camChipId)) {
-            throw new ServiceException("摄像头正在执行追踪任务");
-        }
-        if (pendingTrackingBySliderLamp.containsKey(sliderLampChipId)
-                || activeTrackingByCam.values().stream()
-                        .anyMatch(session -> sameChipId(session.sliderLampChipId(), sliderLampChipId))) {
-            throw new ServiceException("滑轨控制灯正在执行追踪任务");
-        }
+        pushTracking(candidate, "tracking", successMessage, cam.getStoreId());
     }
 
     String buildCameraStartTrackingCommand(
@@ -2184,14 +1987,6 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         return command.toString();
     }
 
-    private boolean sendSliderPositionToLamp(String lampChipId, double sliderTargetMm, String source) {
-        ObjectNode command = objectMapper.createObjectNode();
-        command.put("type", "arm_position");
-        command.put("source", source);
-        command.put("slider", sliderTargetMm);
-        return deviceSessionManager.sendToDevice(lampChipId, command.toString());
-    }
-
     private DeviceDO requireSliderLampForCurrentStore(DeviceCamRoiConfigVO config) {
         if (!notBlank(config.getSliderLampChipId())) {
             throw new ServiceException("请先配置滑轨控制灯");
@@ -2207,15 +2002,14 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     private void stopTrackingIfActive(String camChipId, String reason) {
-        PendingTracking pending = cancelPendingTracking(camChipId);
         TrackingSession active = activeTrackingByCam.remove(camChipId);
-        if (active == null && pending == null) {
+        if (active == null) {
             return;
         }
 
-        String lampChipId = active != null ? active.lampChipId() : pending.lampChipId();
-        int targetIndex = active != null ? active.targetIndex() : pending.targetIndex();
-        TrackingSource source = active != null ? active.source() : pending.source();
+        String lampChipId = active.lampChipId();
+        int targetIndex = active.targetIndex();
+        TrackingSource source = active.source();
 
         DeviceDO cam = requireCam(camChipId);
         sendLampTrackingStop(
@@ -2367,28 +2161,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         MANUAL
     }
 
-    private record PendingTracking(
-            String id,
-            String camChipId,
-            String lampChipId,
-            String sliderLampChipId,
-            int targetIndex,
-            Double confidence,
-            String lampIp,
-            Long storeId,
-            TrackingSource source,
-            String successMessage,
-            TimedSliderMotion motionPlan
-    ) {
-        private String trackingKey() {
-            return lampChipId + "#" + targetIndex;
-        }
-    }
-
     private record TrackingSession(
             String camChipId,
             String lampChipId,
-            String sliderLampChipId,
             int targetIndex,
             TrackingSource source
     ) {

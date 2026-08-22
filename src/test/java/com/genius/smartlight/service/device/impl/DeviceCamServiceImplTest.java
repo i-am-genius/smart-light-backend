@@ -149,22 +149,9 @@ class DeviceCamServiceImplTest {
 
         DeviceTrackingStatusRespVO result = service.startTrackingManually(manualTrackingRequest(1));
 
-        assertThat(result.getTrackingStatus()).isEqualTo("waiting_motion");
-        verify(deviceSessionManager, never()).sendToDevice(eq(MANUAL_CAM_CHIP_ID), any(String.class));
-        verify(deviceSessionManager, never()).sendToDevice(
-                eq(MANUAL_LAMP_CHIP_ID),
-                argThat(payload -> payload.contains("\"type\":\"lampTrackingStart\""))
-        );
-
-        service.triggerPendingTracking(MANUAL_CAM_CHIP_ID);
+        assertThat(result.getTrackingStatus()).isEqualTo("tracking");
 
         InOrder commandOrder = inOrder(deviceSessionManager);
-        commandOrder.verify(deviceSessionManager)
-                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), org.mockito.ArgumentMatchers.argThat(
-                        payload -> payload.contains("\"type\":\"arm_position\"")
-                                && payload.contains("\"source\":\"camera_tracking\"")
-                                && payload.contains("\"slider\":600.0")
-                ));
         commandOrder.verify(deviceSessionManager)
                 .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), org.mockito.ArgumentMatchers.argThat(
                         payload -> payload.contains("\"type\":\"lampTrackingStart\"")
@@ -179,6 +166,10 @@ class DeviceCamServiceImplTest {
         assertThat(command.path("targetIndex").asInt()).isEqualTo(1);
         assertThat(command.path("targetChipId").asText()).isEqualTo(MANUAL_LAMP_CHIP_ID);
         assertThat(command.path("lampIp").asText()).isEqualTo("192.168.1.88");
+        verify(deviceSessionManager, never()).sendToDevice(
+                eq(MANUAL_LAMP_CHIP_ID),
+                argThat(payload -> payload.contains("\"source\":\"camera_tracking\""))
+        );
     }
 
     @Test
@@ -186,7 +177,6 @@ class DeviceCamServiceImplTest {
         configureManualTrackingDevices(true, true, "192.168.1.88");
         writeManualTrackingConfig();
         service.startTrackingManually(manualTrackingRequest(1));
-        service.triggerPendingTracking(MANUAL_CAM_CHIP_ID);
 
         DeviceTrackingStatusReqVO status = new DeviceTrackingStatusReqVO();
         status.setChipId(MANUAL_CAM_CHIP_ID);
@@ -201,13 +191,11 @@ class DeviceCamServiceImplTest {
         assertThat(service.getTrackingStatus(MANUAL_LAMP_CHIP_ID)).isEqualTo("stopped");
 
         ArgumentCaptor<String> lampPayloads = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager, times(3))
+        verify(deviceSessionManager, times(2))
                 .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), lampPayloads.capture());
         assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(0)).path("type").asText())
-                .isEqualTo("arm_position");
-        assertThat(objectMapper.readTree(lampPayloads.getAllValues().get(1)).path("type").asText())
                 .isEqualTo("lampTrackingStart");
-        JsonNode stop = objectMapper.readTree(lampPayloads.getAllValues().get(2));
+        JsonNode stop = objectMapper.readTree(lampPayloads.getAllValues().get(1));
         assertThat(stop.path("type").asText()).isEqualTo("lampTrackingStop");
         assertThat(stop.path("clearClothTaken").asBoolean()).isTrue();
 
@@ -231,7 +219,7 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void monitoringStatus_doesNotCancelPendingSliderAlignment() throws Exception {
+    void monitoringStatus_doesNotCancelActiveTracking() throws Exception {
         configureManualTrackingDevices(true, true, "192.168.1.88");
         writeManualTrackingConfig();
         service.startTrackingManually(manualTrackingRequest(1));
@@ -240,7 +228,6 @@ class DeviceCamServiceImplTest {
         monitoring.setCamChipId(MANUAL_CAM_CHIP_ID);
         monitoring.setWorkStatus("monitoring");
         service.reportStatus(monitoring);
-        service.triggerPendingTracking(MANUAL_CAM_CHIP_ID);
 
         assertThat(service.getTrackingStatus(MANUAL_CAM_CHIP_ID)).isEqualTo("tracking");
         verify(deviceSessionManager).sendToDevice(
@@ -351,6 +338,55 @@ class DeviceCamServiceImplTest {
 
         assertThat(task.getStatus()).isEqualTo("waiting_motion");
         verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
+    }
+
+    @Test
+    void createCaptureTask_allowsActiveTrackingOnTheLogicalCamera() throws Exception {
+        configureManualTrackingDevices(true, true, "192.168.1.88");
+        writeManualTrackingConfig();
+        service.startTrackingManually(manualTrackingRequest(1));
+
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId(MANUAL_CAM_CHIP_ID);
+        request.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+        request.setTargetIndex(1);
+
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+
+        assertThat(task.getStatus()).isEqualTo("waiting_motion");
+        verify(deviceSessionManager, times(2))
+                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), any(String.class));
+    }
+
+    @Test
+    void manualTrackingStart_allowsActiveCaptureOnTheLogicalCamera() throws Exception {
+        configureManualTrackingDevices(true, true, "192.168.1.88");
+        writeManualTrackingConfig();
+
+        DeviceCamCaptureTaskReqVO captureRequest = new DeviceCamCaptureTaskReqVO();
+        captureRequest.setCamChipId(MANUAL_CAM_CHIP_ID);
+        captureRequest.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+        captureRequest.setTargetIndex(1);
+        DeviceCamCaptureTaskRespVO captureTask = service.createCaptureTask(captureRequest);
+
+        DeviceTrackingStatusRespVO tracking = service.startTrackingManually(manualTrackingRequest(1));
+
+        assertThat(captureTask.getStatus()).isIn("waiting_motion", "capturing");
+        assertThat(tracking.getTrackingStatus()).isEqualTo("tracking");
+    }
+
+    @Test
+    void manualTrackingStart_doesNotRequireSliderBinding() throws Exception {
+        configureManualTrackingDevices(true, true, "192.168.1.88");
+        writeManualTrackingConfigWithoutSlider();
+
+        DeviceTrackingStatusRespVO tracking = service.startTrackingManually(manualTrackingRequest(1));
+
+        assertThat(tracking.getTrackingStatus()).isEqualTo("tracking");
+        verify(deviceSessionManager).sendToDevice(
+                eq(MANUAL_CAM_CHIP_ID),
+                argThat(payload -> payload.contains("\"type\":\"cameraStartTracking\""))
+        );
     }
 
     @Test
@@ -901,6 +937,23 @@ class DeviceCamServiceImplTest {
         config.setRois(List.of(roi));
         config.setSliderPresets(Map.of("1", 600.0));
         config.setSliderMoveTimes(moveTimes(1));
+
+        Path path = manualConfigPath();
+        Files.createDirectories(path.getParent());
+        objectMapper.writeValue(path.toFile(), config);
+    }
+
+    private void writeManualTrackingConfigWithoutSlider() throws Exception {
+        DeviceCamRoiItemVO roi = new DeviceCamRoiItemVO();
+        roi.setTargetIndex(1);
+        roi.setTargetChipId(MANUAL_LAMP_CHIP_ID);
+        roi.setAreaName("无滑轨追踪测试区");
+
+        DeviceCamRoiConfigVO config = new DeviceCamRoiConfigVO();
+        config.setCamChipId(MANUAL_CAM_CHIP_ID);
+        config.setCaptureControllerChipId(CAPTURE_CONTROLLER_CHIP_ID);
+        config.setConfigured(true);
+        config.setRois(List.of(roi));
 
         Path path = manualConfigPath();
         Files.createDirectories(path.getParent());

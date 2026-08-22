@@ -641,6 +641,47 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
+    void collisionGuard_staysParkedUntilSingleCaptureLeavesTargetLamp() throws Exception {
+        DeviceCamRoiConfigVO config = objectMapper.readValue(
+                defaultConfigPath().toFile(), DeviceCamRoiConfigVO.class);
+        DeviceCamRoiItemVO target = config.getRois().get(0);
+        target.setCollisionCenterMm(320D);
+        target.setCollisionClearanceMm(80D);
+        target.setCollisionParkTimeSeconds(0.001D);
+        objectMapper.writeValue(defaultConfigPath().toFile(), config);
+
+        DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
+        request.setCamChipId("CAM-001");
+        request.setTargetChipId("LAMP-001");
+        request.setTargetIndex(1);
+        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
+        awaitCameraCapture(task.getTaskId());
+
+        verify(deviceSessionManager).sendToDevice(
+                eq("LAMP-001"),
+                argThat(payload -> payload.contains("\"type\":\"lampCollisionGuard\"")
+                        && payload.contains("\"action\":\"park\""))
+        );
+        verify(deviceSessionManager, never()).sendToDevice(
+                eq("LAMP-001"),
+                argThat(payload -> payload.contains("\"type\":\"lampCollisionGuard\"")
+                        && payload.contains("\"action\":\"release\""))
+        );
+
+        DeviceCamCaptureTaskRespVO response = service.uploadCapturePhoto(
+                task.getTaskId(),
+                new MockMultipartFile("file", "guarded-single.jpg", "image/jpeg", new byte[]{1, 2, 3})
+        );
+        rememberTestUpload(response);
+
+        verify(deviceSessionManager, timeout(1500)).sendToDevice(
+                eq("LAMP-001"),
+                argThat(payload -> payload.contains("\"type\":\"lampCollisionGuard\"")
+                        && payload.contains("\"action\":\"release\""))
+        );
+    }
+
+    @Test
     void flowPhotoUpload_acceptsBoundCaptureControllerTokenAndRunsServerDetection() {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "flow.jpg", "image/jpeg", new byte[]{1, 2, 3}

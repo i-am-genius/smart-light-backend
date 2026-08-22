@@ -123,6 +123,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private final Map<String, String> activeCaptureTaskByCaptureController = new ConcurrentHashMap<>();
     private final Map<String, String> captureSliderLampByTask = new ConcurrentHashMap<>();
     private final Map<String, String> captureControllerByTask = new ConcurrentHashMap<>();
+    private final Map<String, CollisionGuardSession> retainedCaptureGuards = new ConcurrentHashMap<>();
     private final Map<String, PendingSingleReturn> pendingSingleReturns = new ConcurrentHashMap<>();
     private final Map<String, PendingBatchReturn> pendingBatchReturns = new ConcurrentHashMap<>();
     private final ScheduledExecutorService captureTimeoutExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -536,6 +537,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         CollisionGuardSession guardSession;
         try {
             guardSession = prepareCollisionGuards(config, motionPlan, task.getTaskId());
+            retainCollisionGuards(task.getTaskId(), guardSession);
         } catch (RuntimeException e) {
             discardCaptureTask(task);
             throw e;
@@ -546,10 +548,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 sendSliderMotionCommand(sliderLamp.getChipId(), sliderTargetMm,
                         "camera_capture", task.getTaskId());
                 beginSliderMotion(sliderLamp, motionPlan);
-                scheduleCollisionRelease(guardSession, motionPlan.delayMs());
                 scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
             } catch (RuntimeException e) {
-                releaseCollisionGuards(guardSession);
+                releaseRetainedCollisionGuards(task.getTaskId());
                 failCaptureTask(task, "motion_command_failed", e.getMessage(), cam.getStoreId());
             }
         };
@@ -879,6 +880,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         CollisionGuardSession guardSession;
         try {
             guardSession = prepareCollisionGuards(context.config(), motionPlan, task.getTaskId());
+            retainCollisionGuards(task.getTaskId(), guardSession);
         } catch (RuntimeException e) {
             pendingCaptureMotions.remove(task.getTaskId(), pending);
             failBatchPhysicalTask(task, "collision_guard_failed", e.getMessage());
@@ -890,10 +892,9 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 sendSliderMotionCommand(context.sliderLampChipId(), target.sliderTargetMm(),
                         "camera_capture", task.getTaskId());
                 beginSliderMotion(sliderLamp, motionPlan);
-                scheduleCollisionRelease(guardSession, motionPlan.delayMs());
                 scheduleTimedCapture(task.getTaskId(), motionPlan.delayMs());
             } catch (RuntimeException e) {
-                releaseCollisionGuards(guardSession);
+                releaseRetainedCollisionGuards(task.getTaskId());
                 pendingCaptureMotions.remove(task.getTaskId(), pending);
                 failBatchPhysicalTask(task, "motion_command_failed", e.getMessage());
             }
@@ -988,6 +989,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         CollisionGuardSession guardSession;
         try {
             guardSession = prepareCollisionGuards(context.config(), motionPlan, batch.getBatchId());
+            retainCollisionGuards(batch.getBatchId(), guardSession);
         } catch (RuntimeException e) {
             pendingBatchReturns.remove(batch.getBatchId(), pending);
             finishCaptureBatch(context, "return_failed", e.getMessage(), "error");
@@ -998,10 +1000,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 sendSliderMotionCommand(context.sliderLampChipId(), context.standbySliderMm(),
                         "camera_batch_return", batch.getBatchId());
                 beginSliderMotion(sliderLamp, motionPlan);
-                scheduleCollisionRelease(guardSession, motionPlan.delayMs());
                 scheduleTimedBatchReturn(batch.getBatchId(), motionPlan.delayMs());
             } catch (RuntimeException e) {
-                releaseCollisionGuards(guardSession);
                 pendingBatchReturns.remove(batch.getBatchId(), pending);
                 finishCaptureBatch(context, "return_failed", e.getMessage(), "error");
             }
@@ -1027,6 +1027,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             batch.setMessage(message);
         }
         pendingBatchReturns.remove(batch.getBatchId());
+        releaseBatchCollisionGuards(context);
         releaseCaptureSlots(batch.getBatchId(), batch.getCamChipId());
         webSocketPushService.pushCamStatus(Map.of(
                 "camChipId", batch.getCamChipId(),
@@ -1112,6 +1113,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                     cam.getChipId(), sliderLamp.getChipId(), standbySliderMm, cam.getStoreId());
             pendingSingleReturns.put(taskId, pending);
             guardSession = prepareCollisionGuards(config, motionPlan, taskId);
+            retainCollisionGuards(taskId, guardSession);
         } catch (RuntimeException e) {
             failSingleCaptureReturn(task, cam, null, e.getMessage());
             return;
@@ -1130,10 +1132,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
                 sendSliderMotionCommand(pending.sliderLampChipId(), pending.targetMm(),
                         "camera_single_return", taskId);
                 beginSliderMotion(sliderLamp, motionPlan);
-                scheduleCollisionRelease(guardSession, motionPlan.delayMs());
                 scheduleTimedSingleReturn(taskId, motionPlan.delayMs());
             } catch (RuntimeException e) {
-                releaseCollisionGuards(guardSession);
                 failSingleCaptureReturn(task, cam, pending, e.getMessage());
             }
         };
@@ -1151,6 +1151,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         } else {
             pendingSingleReturns.remove(task.getTaskId(), pending);
         }
+        releaseRetainedCollisionGuards(task.getTaskId());
         releaseCaptureSlots(task);
         String detail = notBlank(reason) ? reason : "未知错误";
         try {
@@ -1404,6 +1405,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             captureUploadTokens.remove(taskId);
             pendingCaptureMotions.remove(taskId);
             pendingSingleReturns.remove(taskId);
+            releaseRetainedCollisionGuards(taskId);
             captureBatchByTask.remove(taskId);
             if (task != null) {
                 releaseCaptureSlots(task);
@@ -1414,8 +1416,13 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private void scheduleBatchCleanup(String batchId) {
         captureTimeoutExecutor.schedule(() -> {
             batchCache.remove(batchId);
-            batchContexts.remove(batchId);
+            CaptureBatchContext context = batchContexts.remove(batchId);
             pendingBatchReturns.remove(batchId);
+            if (context != null) {
+                releaseBatchCollisionGuards(context);
+            } else {
+                releaseRetainedCollisionGuards(batchId);
+            }
         }, 5, TimeUnit.MINUTES);
     }
 
@@ -1486,6 +1493,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
         task.setStatus("timeout");
         task.setMessage("capture photo upload timeout");
+        releaseRetainedCollisionGuards(taskId);
         releaseCaptureSlots(task);
         scheduleTaskCleanup(taskId);
         try {
@@ -1532,6 +1540,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         } catch (RuntimeException e) {
             log.warn("single capture return slider state completion failed, taskId={}", taskId, e);
         }
+        releaseRetainedCollisionGuards(taskId);
         releaseCaptureSlots(taskId, pending.camChipId());
         try {
             webSocketPushService.pushCamStatus(Map.of(
@@ -1580,6 +1589,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         captureUploadTokens.remove(task.getTaskId());
         pendingCaptureMotions.remove(task.getTaskId());
         pendingSingleReturns.remove(task.getTaskId());
+        releaseRetainedCollisionGuards(task.getTaskId());
         releaseCaptureSlots(task);
     }
 
@@ -1589,12 +1599,18 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         pendingBatchReturns.remove(batchId);
         if (batch != null) {
             for (DeviceCamCaptureTaskRespVO task : batch.getTasks()) {
+                releaseRetainedCollisionGuards(task.getTaskId());
                 taskCache.remove(task.getTaskId());
                 captureUploadTokens.remove(task.getTaskId());
                 pendingCaptureMotions.remove(task.getTaskId());
                 captureBatchByTask.remove(task.getTaskId());
             }
+        } else if (context != null) {
+            for (DeviceCamCaptureTaskRespVO task : context.batch().getTasks()) {
+                releaseRetainedCollisionGuards(task.getTaskId());
+            }
         }
+        releaseRetainedCollisionGuards(batchId);
         String camChipId = batch != null
                 ? batch.getCamChipId()
                 : (context == null ? null : context.batch().getCamChipId());
@@ -1650,6 +1666,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         captureUploadTokens.remove(task.getTaskId());
         pendingCaptureMotions.remove(task.getTaskId());
         pendingSingleReturns.remove(task.getTaskId());
+        releaseRetainedCollisionGuards(task.getTaskId());
         releaseCaptureSlots(task);
         webSocketPushService.pushCamCaptureResult(task, storeId);
         scheduleTaskCleanup(task.getTaskId());
@@ -2205,10 +2222,36 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         }
     }
 
-    private void scheduleCollisionRelease(CollisionGuardSession session, long delayMs) {
-        if (!session.lampChipIds().isEmpty()) {
-            captureTimeoutExecutor.schedule(() -> releaseCollisionGuards(session), delayMs, TimeUnit.MILLISECONDS);
+    private void retainCollisionGuards(String operationId, CollisionGuardSession session) {
+        if (session.lampChipIds().isEmpty()) {
+            return;
         }
+        retainedCaptureGuards.compute(operationId, (key, current) -> {
+            if (current == null) {
+                return session;
+            }
+            Set<String> lampChipIds = new HashSet<>(current.lampChipIds());
+            lampChipIds.addAll(session.lampChipIds());
+            return new CollisionGuardSession(
+                    operationId,
+                    List.copyOf(lampChipIds),
+                    Math.max(current.parkDelayMs(), session.parkDelayMs())
+            );
+        });
+    }
+
+    private void releaseRetainedCollisionGuards(String operationId) {
+        CollisionGuardSession session = retainedCaptureGuards.remove(operationId);
+        if (session != null) {
+            releaseCollisionGuards(session);
+        }
+    }
+
+    private void releaseBatchCollisionGuards(CaptureBatchContext context) {
+        for (DeviceCamCaptureTaskRespVO task : context.batch().getTasks()) {
+            releaseRetainedCollisionGuards(task.getTaskId());
+        }
+        releaseRetainedCollisionGuards(context.batch().getBatchId());
     }
 
     private void releaseCollisionGuards(CollisionGuardSession session) {

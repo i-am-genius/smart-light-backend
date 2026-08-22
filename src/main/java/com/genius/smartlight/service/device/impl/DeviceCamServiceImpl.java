@@ -2220,7 +2220,8 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     private CollisionGuardSession prepareCollisionGuards(
             DeviceCamRoiConfigVO config, TimedSliderMotion motionPlan, String operationId) {
         SliderCollisionPlanner.CollisionPlan plan = SliderCollisionPlanner.plan(
-                motionPlan.currentPositionMm(), motionPlan.targetPositionMm(), config.getRois());
+                motionPlan.currentPositionMm(), motionPlan.targetPositionMm(),
+                config.getRois(), config.getSliderPresets());
         if (plan.lamps().isEmpty()) return new CollisionGuardSession(operationId, List.of(), 0L);
         java.util.ArrayList<String> parked = new java.util.ArrayList<>();
         CollisionGuardSession session = new CollisionGuardSession(

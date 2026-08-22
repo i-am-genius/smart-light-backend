@@ -11,21 +11,26 @@ import java.util.Map;
 final class SliderCollisionPlanner {
     private SliderCollisionPlanner() {}
 
-    static CollisionPlan plan(double currentMm, double targetMm, List<DeviceCamRoiItemVO> items) {
+    static CollisionPlan plan(
+            double currentMm,
+            double targetMm,
+            List<DeviceCamRoiItemVO> items,
+            Map<String, Double> sliderPresets) {
         validatePosition(currentMm);
         validatePosition(targetMm);
-        if (Math.abs(currentMm - targetMm) < 0.001D) return new CollisionPlan(List.of(), 0L);
         double pathMin = Math.min(currentMm, targetMm);
         double pathMax = Math.max(currentMm, targetMm);
         Map<String, GuardedLamp> affected = new LinkedHashMap<>();
         for (DeviceCamRoiItemVO item : items == null ? List.<DeviceCamRoiItemVO>of() : items) {
-            if (item == null || item.getTargetChipId() == null || item.getTargetChipId().isBlank()) continue;
-            double center = requirePosition(item.getCollisionCenterMm(), "碰撞中心位置");
-            double clearance = requirePositive(item.getCollisionClearanceMm(), "碰撞避让距离");
-            double parkSeconds = requirePositive(item.getCollisionParkTimeSeconds(), "灯具 Pan/Tilt 避让时间");
-            double zoneMin = Math.max(SliderMotionEstimator.SLIDER_MIN_MM, center - clearance);
-            double zoneMax = Math.min(SliderMotionEstimator.SLIDER_MAX_MM, center + clearance);
-            if (pathMax < zoneMin || pathMin > zoneMax) continue;
+            if (item == null || item.getTargetChipId() == null || item.getTargetChipId().isBlank()
+                    || item.getTargetIndex() == null) continue;
+            Double lampPosition = sliderPresets == null
+                    ? null
+                    : sliderPresets.get(String.valueOf(item.getTargetIndex()));
+            if (lampPosition == null) continue;
+            double position = requirePosition(lampPosition, "区域 " + item.getTargetIndex() + " 的 Slider 位置");
+            if (position < pathMin || position > pathMax) continue;
+            double parkSeconds = requirePositive(item.getCollisionParkTimeSeconds(), "灯具 Pan/Tilt 回零时间");
             long parkMs = (long) Math.ceil(parkSeconds * 1000D);
             String chipId = item.getTargetChipId().trim();
             affected.merge(chipId, new GuardedLamp(chipId, parkMs),

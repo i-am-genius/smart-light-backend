@@ -315,18 +315,16 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void createCaptureTask_allowsOfflineTargetWhenSliderControllerIsOnline() {
+    void createCaptureTask_rejectsOfflineLampOnSliderPath() {
         when(deviceSessionManager.isOnline("LAMP-001")).thenReturn(false);
         DeviceCamCaptureTaskReqVO request = new DeviceCamCaptureTaskReqVO();
         request.setCamChipId("CAM-001");
         request.setTargetChipId("LAMP-001");
         request.setTargetIndex(1);
 
-        DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
-
-        assertThat(task.getStatus()).isEqualTo("waiting_motion");
-        verify(deviceSessionManager, never()).isOnline("LAMP-001");
-        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
+        assertThatThrownBy(() -> service.createCaptureTask(request))
+                .hasMessageContaining("碰撞避让灯离线");
+        verify(deviceSessionManager, never()).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
     }
 
     @Test
@@ -340,7 +338,8 @@ class DeviceCamServiceImplTest {
         DeviceCamCaptureTaskRespVO task = service.createCaptureTask(request);
 
         assertThat(task.getStatus()).isEqualTo("waiting_motion");
-        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
+        verify(deviceSessionManager, timeout(1500))
+                .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), any(String.class));
     }
 
     @Test
@@ -549,7 +548,8 @@ class DeviceCamServiceImplTest {
         DeviceCamCaptureTaskRespVO result = service.createCaptureTask(request);
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
+        verify(deviceSessionManager, timeout(1500))
+                .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode payload = new ObjectMapper().readTree(payloadCaptor.getValue());
         assertThat(payload.path("type").asText()).isEqualTo("arm_position");
         assertThat(payload.path("source").asText()).isEqualTo("camera_capture");
@@ -641,12 +641,12 @@ class DeviceCamServiceImplTest {
     }
 
     @Test
-    void collisionGuard_staysParkedUntilSingleCaptureLeavesTargetLamp() throws Exception {
+    void pathGuard_ignoresLegacyCollisionZoneAndStaysParkedUntilSingleCaptureLeaves() throws Exception {
         DeviceCamRoiConfigVO config = objectMapper.readValue(
                 defaultConfigPath().toFile(), DeviceCamRoiConfigVO.class);
         DeviceCamRoiItemVO target = config.getRois().get(0);
-        target.setCollisionCenterMm(320D);
-        target.setCollisionClearanceMm(80D);
+        target.setCollisionCenterMm(2_000D);
+        target.setCollisionClearanceMm(0D);
         target.setCollisionParkTimeSeconds(0.001D);
         objectMapper.writeValue(defaultConfigPath().toFile(), config);
 
@@ -772,8 +772,13 @@ class DeviceCamServiceImplTest {
 
         assertThat(result.getTargetIndex()).isEqualTo(2);
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager).sendToDevice(eq(MANUAL_LAMP_CHIP_ID), payloadCaptor.capture());
-        JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
+        verify(deviceSessionManager, timeout(1500).times(2))
+                .sendToDevice(eq(MANUAL_LAMP_CHIP_ID), payloadCaptor.capture());
+        JsonNode payload = payloadCaptor.getAllValues().stream()
+                .map(this::readJsonUnchecked)
+                .filter(value -> "arm_position".equals(value.path("type").asText()))
+                .findFirst()
+                .orElseThrow();
         assertThat(payload.path("source").asText()).isEqualTo("camera_capture");
         assertThat(payload.path("taskId").asText()).isEqualTo(result.getTaskId());
         assertThat(payload.path("slider").asDouble()).isEqualTo(600.0);
@@ -809,7 +814,8 @@ class DeviceCamServiceImplTest {
                 .containsExactly("waiting_motion", "queued", "queued");
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager).sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
+        verify(deviceSessionManager, timeout(1500))
+                .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode payload = objectMapper.readTree(payloadCaptor.getValue());
         assertThat(payload.path("source").asText()).isEqualTo("camera_capture");
         assertThat(payload.path("taskId").asText()).isEqualTo(batch.getTasks().get(0).getTaskId());
@@ -855,7 +861,7 @@ class DeviceCamServiceImplTest {
         service.startAutomaticGarmentDetection(1L);
 
         assertThat(service.getGarmentDetectionStatus(1L)).isEqualTo("detecting");
-        verify(deviceSessionManager, times(1)).sendToDevice(
+        verify(deviceSessionManager, timeout(1500).times(1)).sendToDevice(
                 eq(SLIDER_LAMP_CHIP_ID),
                 argThat(payload -> payload.contains("\"type\":\"arm_position\""))
         );
@@ -869,7 +875,7 @@ class DeviceCamServiceImplTest {
 
         service.startAutomaticGarmentDetection(1L);
         assertThat(service.getGarmentDetectionStatus(1L)).isEqualTo("detecting");
-        verify(deviceSessionManager, times(2)).sendToDevice(
+        verify(deviceSessionManager, timeout(1500).times(2)).sendToDevice(
                 eq(SLIDER_LAMP_CHIP_ID),
                 argThat(payload -> payload.contains("\"type\":\"arm_position\""))
         );
@@ -903,7 +909,7 @@ class DeviceCamServiceImplTest {
         assertThat(batch.getTasks().get(1).getStatus()).isEqualTo("waiting_motion");
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager, times(2))
+        verify(deviceSessionManager, timeout(1500).times(2))
                 .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode nextMotion = objectMapper.readTree(payloadCaptor.getAllValues().get(1));
         assertThat(nextMotion.path("taskId").asText()).isEqualTo(batch.getTasks().get(1).getTaskId());
@@ -933,7 +939,7 @@ class DeviceCamServiceImplTest {
 
         assertThat(batch.getStatus()).isEqualTo("returning_standby");
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(deviceSessionManager, times(4))
+        verify(deviceSessionManager, timeout(1500).times(4))
                 .sendToDevice(eq(SLIDER_LAMP_CHIP_ID), payloadCaptor.capture());
         JsonNode returnMotion = objectMapper.readTree(payloadCaptor.getAllValues().get(3));
         assertThat(returnMotion.path("source").asText()).isEqualTo("camera_batch_return");
@@ -941,9 +947,12 @@ class DeviceCamServiceImplTest {
         assertThat(returnMotion.path("slider").asDouble()).isEqualTo(380.0);
         verify(deviceSessionManager, times(3)).sendToDevice(eq(CAPTURE_CONTROLLER_CHIP_ID), any());
         verify(deviceSessionManager, never()).sendToDevice(eq("CAM-001"), any());
-        verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-001"), any());
-        verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-002"), any());
-        verify(deviceSessionManager, never()).sendToDevice(eq("LAMP-003"), any());
+        verify(deviceSessionManager, atLeastOnce()).sendToDevice(
+                eq("LAMP-001"), argThat(payload -> payload.contains("\"action\":\"park\"")));
+        verify(deviceSessionManager, atLeastOnce()).sendToDevice(
+                eq("LAMP-002"), argThat(payload -> payload.contains("\"action\":\"park\"")));
+        verify(deviceSessionManager, atLeastOnce()).sendToDevice(
+                eq("LAMP-003"), argThat(payload -> payload.contains("\"action\":\"park\"")));
 
         awaitBatchStatus(batch, "completed");
     }
@@ -1221,6 +1230,10 @@ class DeviceCamServiceImplTest {
                 device(SLIDER_LAMP_CHIP_ID, "lamp"),
                 device(CAPTURE_CONTROLLER_CHIP_ID, "cam_capture")
         );
+        when(deviceSessionManager.isOnline("LAMP-002")).thenReturn(true);
+        when(deviceSessionManager.isOnline("LAMP-003")).thenReturn(true);
+        when(deviceSessionManager.sendToDevice(eq("LAMP-002"), any(String.class))).thenReturn(true);
+        when(deviceSessionManager.sendToDevice(eq("LAMP-003"), any(String.class))).thenReturn(true);
     }
 
     private Path defaultConfigPath() {

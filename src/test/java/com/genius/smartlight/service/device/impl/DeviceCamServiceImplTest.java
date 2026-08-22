@@ -216,8 +216,8 @@ class DeviceCamServiceImplTest {
                 argThat(payload -> payload.contains("\"type\":\"cameraReturnCenter\""))
         );
         verify(webSocketPushService).pushCamStatus(
-                argThat(payload -> payload instanceof DeviceCamStatusRespVO status
-                        && "returning_center".equals(status.getWorkStatus())),
+                argThat(payload -> payload instanceof DeviceCamStatusRespVO camStatus
+                        && "returning_center".equals(camStatus.getWorkStatus())),
                 eq(1L)
         );
 

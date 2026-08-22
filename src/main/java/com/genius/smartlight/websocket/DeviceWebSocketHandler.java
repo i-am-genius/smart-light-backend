@@ -105,7 +105,6 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
                 ack.put("data", "ok");
                 ack.put("deviceUploadToken", uploadToken);
                 session.sendMessage(new TextMessage(objectMapper.writeValueAsString(ack)));
-                pushCamRoiConfigIfNeeded(session, knownDevice);
                 if (DeviceTypeUtil.isCaptureController(knownDevice.getDeviceType())) {
                     deviceCamService.pushCaptureControllerConfigForDevice(knownDevice.getChipId());
                 }

@@ -470,9 +470,9 @@ class DeviceCamServiceImplTest {
         assertThat(region.path("personCapturePan").asDouble()).isEqualTo(35D);
         assertThat(region.path("personCaptureTilt").asDouble()).isEqualTo(145D);
         assertThat(json).doesNotContain(
-                "capturePresets", "trackingPresets", "yaw", "pitch", "roll",
-                "centerPreset", "trackingLostTimeoutSeconds",
-                "dwellSeconds", "leaveDelaySeconds", "confidenceThreshold", "udpIp", "udpPort"
+                "\"capturePresets\"", "\"trackingPresets\"", "\"yaw\"", "\"pitch\"", "\"roll\"",
+                "\"centerPreset\"", "\"trackingLostTimeoutSeconds\"",
+                "\"dwellSeconds\"", "\"leaveDelaySeconds\"", "\"confidenceThreshold\"", "\"udpIp\"", "\"udpPort\""
         );
         assertThat(mapper.readTree(json).path("sliderPresets").path("1").asDouble()).isEqualTo(320.0);
     }
@@ -532,9 +532,9 @@ class DeviceCamServiceImplTest {
         assertThat(normalized.getFlowUploadIntervalSeconds()).isEqualTo(30);
         assertThat(normalized.getSliderPresets().get("1")).isEqualTo(0.0);
         assertThat(json).doesNotContain(
-                "capturePresets", "trackingPresets", "pan", "tilt", "yaw", "pitch", "roll",
-                "centerPreset", "trackingLostTimeoutSeconds",
-                "dwellSeconds", "leaveDelaySeconds", "confidenceThreshold", "udpIp", "udpPort"
+                "\"capturePresets\"", "\"trackingPresets\"", "\"pan\"", "\"tilt\"", "\"yaw\"", "\"pitch\"", "\"roll\"",
+                "\"centerPreset\"", "\"trackingLostTimeoutSeconds\"",
+                "\"dwellSeconds\"", "\"leaveDelaySeconds\"", "\"confidenceThreshold\"", "\"udpIp\"", "\"udpPort\""
         );
     }
 

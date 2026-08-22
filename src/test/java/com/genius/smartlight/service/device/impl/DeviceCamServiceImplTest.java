@@ -461,8 +461,7 @@ class DeviceCamServiceImplTest {
                 "\"sliderLampChipId\":\"" + SLIDER_LAMP_CHIP_ID + "\"",
                 "\"captureControllerChipId\":\"" + CAPTURE_CONTROLLER_CHIP_ID + "\"",
                 "\"flowUploadEnabled\":true",
-                "\"flowUploadIntervalSeconds\":45",
-                "\"sliderPresets\":{\"1\":320.0}"
+                "\"flowUploadIntervalSeconds\":45"
         );
         JsonNode region = mapper.readTree(json).path("rois").get(0);
         assertThat(region.path("garmentCapturePan").asDouble()).isEqualTo(0D);

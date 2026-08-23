@@ -254,9 +254,11 @@ public class DeviceWebSocketHandler extends TextWebSocketHandler {
             if ("collisionGuardStatus".equals(type)) {
                 chipId = requireChipId(chipId, session, "collisionGuardStatus");
                 if (chipId == null) return;
-                log.debug("collision guard forwarded, chipId={}, guardId={}, status={}, nanoFeedback={}",
-                        chipId, node.path("guardId").asText(""),
-                        node.path("status").asText("unknown"),
+                String guardId = node.path("guardId").asText("");
+                String guardStatus = node.path("status").asText("unknown");
+                deviceSessionManager.confirmCollisionGuard(chipId, guardId, guardStatus);
+                log.info("collision guard status received, chipId={}, guardId={}, status={}, nanoFeedback={}",
+                        chipId, guardId, guardStatus,
                         node.path("nanoFeedback").asBoolean(false));
                 return;
             }

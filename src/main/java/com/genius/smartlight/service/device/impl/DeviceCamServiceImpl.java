@@ -907,6 +907,11 @@ public class DeviceCamServiceImpl implements DeviceCamService {
     }
 
     private void advanceCaptureBatch(DeviceCamCaptureTaskRespVO completedTask) {
+        if (!"image_received".equals(completedTask.getStatus()) || !notBlank(completedTask.getImageName())) {
+            log.warn("batch advance blocked: photo not confirmed, taskId={}, batchId={}, status={}, imageName={}",
+                    completedTask.getTaskId(), completedTask.getBatchId(), completedTask.getStatus(), completedTask.getImageName());
+            return;
+        }
         String batchId = captureBatchByTask.get(completedTask.getTaskId());
         CaptureBatchContext context = batchId == null ? null : batchContexts.get(batchId);
         if (context == null) {
@@ -940,10 +945,17 @@ public class DeviceCamServiceImpl implements DeviceCamService {
         CaptureBatchContext context = batchId == null ? null : batchContexts.get(batchId);
         if (context != null) {
             webSocketPushService.pushCamCaptureResult(task, context.storeId());
+            finishCaptureBatch(
+                    context,
+                    "error",
+                    "batch capture stopped before photo confirmation: " + defaultStatus(message, status),
+                    "error"
+            );
+        } else {
+            releaseRetainedCollisionGuards(task.getTaskId());
+            refreshAutomaticDetectionBatch(batchId);
         }
         scheduleTaskCleanup(task.getTaskId());
-        refreshAutomaticDetectionBatch(batchId);
-        advanceCaptureBatch(task);
     }
 
     private void startBatchReturn(CaptureBatchContext context) {
@@ -1020,7 +1032,7 @@ public class DeviceCamServiceImpl implements DeviceCamService {
             String camWorkStatus) {
         DeviceCamCaptureBatchRespVO batch = context.batch();
         synchronized (context) {
-            if ("completed".equals(batch.getStatus()) || "return_failed".equals(batch.getStatus())) {
+            if (Set.of("completed", "return_failed", "error", "cancelled").contains(batch.getStatus())) {
                 return;
             }
             batch.setStatus(status);
